@@ -2,6 +2,10 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    //alias(libs.plugins.kotlin.kapt)
+    kotlin("kapt")
+    id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin") version "2.0.1"
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -16,6 +20,8 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        manifestPlaceholders["googleMapsKey"] = "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI"
     }
 
     buildTypes {
@@ -68,4 +74,22 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.0.0") {
         exclude(group = "com.google.guava", module = "listenablefuture")
     }
+
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    kapt("androidx.room:room-compiler:2.6.1")
+
+    implementation("androidx.biometric:biometric:1.2.0-alpha05")
+
+    implementation(libs.google.maps)
+    implementation(libs.google.maps.compose)
+
+    implementation(libs.google.playservices.location)
+    implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+    implementation("com.google.firebase:firebase-analytics")
+    implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-database-ktx")
+
+    implementation("com.squareup.retrofit2:retrofit:2.9.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
 }

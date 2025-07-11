@@ -10,6 +10,10 @@ activityCompose = "1.10.1"
 composeBom = "2024.09.00"
 navigationComposeAndroid = "2.9.0"
 compiler = "3.2.0-alpha11"
+maps = "18.2.0"
+mapsCompose = "2.11.4"
+play-services-location = "21.0.1"
+firebase-database = "20.3.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -28,6 +32,9 @@ androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit
 androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-navigation-compose-android = { group = "androidx.navigation", name = "navigation-compose-android", version.ref = "navigationComposeAndroid" }
 androidx-compiler = { group = "androidx.databinding", name = "compiler", version.ref = "compiler" }
+google-maps = { group = "com.google.android.gms", name = "play-services-maps", version.ref = "maps" }
+google-maps-compose = { group = "com.google.maps.android", name = "maps-compose", version.ref = "mapsCompose" }
+google_playservices_location = {group = "com.google.android.gms", name = "play-services-location", version.ref = "play-services-location"}
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

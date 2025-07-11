@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "872712233509",
+    "firebase_url": "https://uberclone-4904e-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "uberclone-4904e",
+    "storage_bucket": "uberclone-4904e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:872712233509:android:949ca4acfc3e00cbee55cc",
+        "android_client_info": {
+          "package_name": "com.example.scrap7"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC_xdewLS6uwCsSLb-ym9C-3zKBoSdGBtk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
