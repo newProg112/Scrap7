@@ -28,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
@@ -124,7 +125,14 @@ fun MapScreen(userId: String, role: String) {
                             }
                         }
 
-                        override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+                        override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                            val status = snapshot.child("status").getValue(String::class.java)
+                            Log.d("TripMatch", "Trip status changed to: $status")
+
+                            if (status == "accepted" || status == "in_progress") {
+                                incomingTrip = snapshot
+                            }
+                        }
                         override fun onChildRemoved(snapshot: DataSnapshot) {}
                         override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
                         override fun onCancelled(error: DatabaseError) {
@@ -163,15 +171,16 @@ fun MapScreen(userId: String, role: String) {
                         val status = snapshot.child("status").getValue(String::class.java)
                         if (status == "accepted") {
                             Log.d("RiderTrip", "Driver accepted the trip!")
-                            showTripAcceptedToast = true
+                            incomingTrip = snapshot
                         }
                     }
 
                     override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
                         val status = snapshot.child("status").getValue(String::class.java)
-                        if (status == "accepted") {
-                            Log.d("RiderTrip", "Trip status changed to accepted")
-                            showTripAcceptedToast = true
+                        Log.d("TripMatch", "Trip status changed to: $status")
+
+                        if (status == "accepted" || status == "in_progress") {
+                            incomingTrip = snapshot
                         }
                     }
 
@@ -259,13 +268,15 @@ fun MapScreen(userId: String, role: String) {
                     },
                     onAccept = {
                         trip.ref.child("status").setValue("accepted")
-                        incomingTrip = null
                         Log.d("TripMatch", "Trip accepted by driver")
                     },
                     onDecline = {
                         trip.ref.child("status").setValue("declined")
                         incomingTrip = null
                         Log.d("TripMatch", "Trip declined by driver")
+                    },
+                    onComplete = {
+                        incomingTrip = null
                     }
                 )
             }
@@ -381,6 +392,7 @@ fun IncomingTripCard(
     onRouteDecoded: (List<LatLng>) -> Unit,
     onAccept: () -> Unit,
     onDecline: () -> Unit,
+    onComplete: () -> Unit,
     context: Context
 ) {
     Log.d("TripUI", "Trip popup triggered for rider: ${trip.child("riderId").value}")
@@ -401,87 +413,102 @@ fun IncomingTripCard(
                     .padding(16.dp)
                     .fillMaxWidth()
             ) {
-                Text("New Trip Request", style = MaterialTheme.typography.titleMedium)
-                Text("Pickup location: $pickupLat, $pickupLng")
+                val tripId = trip.key ?: "unknown"
+                val status = remember { mutableStateOf(trip.child("status").getValue(String::class.java)) }
 
-                Row(
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp)
-                ) {
-                    Button(onClick = {
-                        trip.ref.child("status").setValue("accepted")
-                        Log.d("TripMatch", "Trip accepted by driver")
+                LaunchedEffect(tripId) {
+                    val updated = trip.child("status").getValue(String::class.java)
+                    Log.d("TripFlow", "Trip status updated to: $updated")
+                    status.value = updated
+                }
 
+                LaunchedEffect(status.value) {
+                    if (status.value == "accepted") {
                         val pickupLat = trip.child("riderLat").getValue(Double::class.java)
                         val pickupLng = trip.child("riderLng").getValue(Double::class.java)
 
                         if (pickupLat != null && pickupLng != null && driverLocation != null) {
-                            // val origin = "${driverLocation.latitude},${driverLocation.longitude}"
-                            val origin = "52.9601,-1.1501" // hard-coded for testing
-                            // val destination = "$pickupLat,$pickupLng"
-                            val destination = "52.9620,-1.1400" // hard-coded for testing
+                            val origin = "52.9601,-1.1501" // or use driverLocation
+                            val destination = "52.9620,-1.1400" // or use pickupLat/Lng
 
-                            CoroutineScope(Dispatchers.IO).launch {
-                                try {
-                                    val response = DirectionsClient.service.getRoute(
-                                        origin = origin,
-                                        destination = destination,
-                                        apiKey = "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI"
-                                    )
+                            try {
+                                val response = DirectionsClient.service.getRoute(
+                                    origin = origin,
+                                    destination = destination,
+                                    apiKey = "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI"
+                                )
 
-                                    // Log the coordinates being sent
-                                    Log.d("RouteDraw", "Requesting route: origin=$origin,destination=$destination")
+                                Log.d("RouteDraw", "Requesting route: origin=$origin,destination=$destination")
 
-                                    // Check if the API call failed
-                                    if (!response.isSuccessful) {
-                                        Log.e("RouteDraw", "API failed: ${response.code()} - ${response.message()}")
-                                        return@launch
-                                    }
+                                if (response.isSuccessful) {
+                                    val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                    Log.d("RouteDraw", "Encoded polyline: $polyline")
 
-                                    if (response.isSuccessful) {
-                                        // Log the size of the routes list
-                                        val routes = response.body()?.routes
-                                        Log.d("RouteDraw", "Routes list size: ${routes?.size}")
+                                    if (!polyline.isNullOrEmpty()) {
+                                        val decoded = decodePolyline(polyline)
+                                        Log.d("RouteDraw", "Decoded polyline has ${decoded.size} points")
 
-                                        val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
-                                        Log.d("RouteDraw", "Encoded polyline: $polyline")
-
-                                        if (!polyline.isNullOrEmpty()) {
-                                            val decoded = decodePolyline(polyline)
-                                            Log.d("RouteDraw", "Decoded polyline has ${decoded.size} points")
-
-                                            withContext(Dispatchers.Main) {
-                                                onRouteDecoded(decoded)
-                                            }
-                                        } else {
-                                            Log.w("RouteDraw", "No polyline found")
-                                        }
+                                        onRouteDecoded(decoded)
                                     } else {
-                                        Log.e("RouteDraw", "API call failed: ${response.code()}")
+                                        Log.w("RouteDraw", "No polyline found")
                                     }
-                                } catch (e: Exception) {
-                                    Log.e("RouteDraw", "Error calling directions API: ${e.message}")
-                                    e.printStackTrace() // forces full stack trace to show in Logcat
-
-                                    withContext(Dispatchers.Main) {
-                                        Toast.makeText(context, "Route fetch failed: ${e.message}", Toast.LENGTH_LONG).show()
-                                    }
+                                } else {
+                                    Log.e("RouteDraw", "API failed: ${response.code()} - ${response.message()}")
                                 }
+                            } catch (e: Exception) {
+                                Log.e("RouteDraw", "Error calling directions API: ${e.message}")
                             }
                         }
-
-                        // Clear the trip so the popup disappears
-                        onAccept()
-                    }) {
-                        Text("Accept")
-                    }
-
-
-
-                    Button(onClick = onDecline) {
-                        Text("Decline")
                     }
                 }
+
+                Text("New Trip Request", style = MaterialTheme.typography.titleMedium)
+                Text("Pickup location: $pickupLat, $pickupLng")
+
+                when (status.value) {
+                    "requested" -> {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp)
+                    ) {
+                        Button(onClick = onAccept) {
+                            Text("Accept")
+                        }
+                        Button(onClick = onDecline) {
+                            Text("Decline")
+                        }
+                    }
+                }
+
+                "accepted" -> {
+                    Button(
+                        onClick = {
+                            trip.ref.child("status").setValue("in_progress")
+                            Log.d("TripFlow", "Trip marked as in_progress")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp)
+                    ) {
+                        Text("Start Trip")
+                    }
+                }
+
+                "in_progress" -> {
+                Button(
+                    onClick = {
+                        trip.ref.child("status").setValue("completed")
+                        onComplete()
+                        Log.d("TripFlow", "Trip marked as completed")
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp)
+                ) {
+                    Text("Complete Trip")
+                }
+            }
+            }
             }
         }
     }
