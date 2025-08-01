@@ -30,6 +30,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.scrap7.ui.theme.Scrap7Theme
+import com.google.android.libraries.places.api.Places
 import com.google.firebase.FirebaseApp
 import com.google.firebase.database.FirebaseDatabase
 import java.util.logging.Handler
@@ -37,6 +38,11 @@ import java.util.logging.Handler
 class MainActivity : ComponentActivity()/*FragmentActivity() */ {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize the Places SDK
+        if (!Places.isInitialized()) {
+            Places.initialize(applicationContext, "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI")
+        }
 
         Log.d("FirebaseTest", "FirebaseApp initialized: ${FirebaseApp.getApps(this).isNotEmpty()}")
 
@@ -160,8 +166,21 @@ fun MyApp() {
         ) { backStackEntry ->
             val userId = backStackEntry.arguments?.getString("userId") ?: ""
             val role = backStackEntry.arguments?.getString("role") ?: "rider"
-            MapScreen(userId = userId, role = role)
+            MapScreen(userId = userId, role = role, navController = navController)
         }
+
+        composable(
+            "chat/{tripId}/{userId}",
+            arguments = listOf(
+                navArgument("tripId") { type = NavType.StringType },
+                navArgument("userId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val tripId = backStackEntry.arguments?.getString("tripId") ?: ""
+            val userId = backStackEntry.arguments?.getString("userId") ?: ""
+            ChatScreen(tripId = tripId, userId = userId)
+        }
+
     }
 }
 
