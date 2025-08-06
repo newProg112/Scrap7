@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -101,6 +102,10 @@ fun bitmapDescriptorFromVector(context: Context, @DrawableRes resId: Int): Bitma
 
 @Composable
 fun MapScreen(userId: String, role: String, navController: NavController) {
+    val viewModel: MapViewModel = viewModel()
+    val routeToPickup = viewModel.routeToPickup
+    val routeToDestination = viewModel.routeToDestination
+
     val context = LocalContext.current
     val cameraPositionState = rememberCameraPositionState()
     var userLocation by remember { mutableStateOf<LatLng?>(null) }
@@ -118,8 +123,8 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
 
     var shouldFollowUser by remember { mutableStateOf(true) }
 
-    var routeToPickup by remember { mutableStateOf<List<LatLng>>(emptyList()) }
-    var routeToDestination by remember { mutableStateOf<List<LatLng>>(emptyList()) }
+    // var routeToPickup by remember { mutableStateOf<List<LatLng>>(emptyList()) }
+    // var routeToDestination by remember { mutableStateOf<List<LatLng>>(emptyList()) }
 
 /*
     var routeToDestination by rememberSaveable(stateSaver = latLngListSaver) {
@@ -225,7 +230,17 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                                                     val decoded = decodePolyline(polyline)
                                                     Log.d("TripRestore", "Decoded polyline: ${decoded.size} points")
                                                     withContext(Dispatchers.Main) {
-                                                        routeToDestination = decoded
+                                                        viewModel.updateRouteToDestination(decoded)
+
+                                                        if (decoded.isNotEmpty()) {
+                                                            val boundsBuilder = LatLngBounds.builder()
+                                                            decoded.forEach { boundsBuilder.include(it) }
+                                                            val bounds = boundsBuilder.build()
+
+                                                            cameraPositionState.move(
+                                                                CameraUpdateFactory.newLatLngBounds(bounds, 100)
+                                                            )
+                                                        }
                                                     }
                                                 } else {
                                                     Log.w("TripRestore", "No polyline found")
@@ -247,112 +262,138 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-    // Start location tracking
-    RequestLocationPermission {
-        locationTracker.startListening { location ->
-            val latLng = LatLng(location.latitude, location.longitude)
-            userLocation = latLng
+        // Start location tracking
+        RequestLocationPermission {
+            locationTracker.startListening { location ->
+                val latLng = LatLng(location.latitude, location.longitude)
+                userLocation = latLng
 
-            // Move the map camera to current location
-            if (shouldFollowUser) {
-                cameraPositionState.move(
-                    CameraUpdateFactory.newLatLngZoom(location, 16f)
-                )
-            }
-
-            // If user is a driver, update location in Firebase
-            if (role == "driver") {
-                val locationData = mapOf(
-                    "lat" to location.latitude,
-                    "lng" to location.longitude,
-                    "timestamp" to System.currentTimeMillis()
-                )
-
-                Log.d("MapScreen", "Uploading driver location for userId=$userId: $locationData")
-
-                FirebaseDatabase.getInstance()
-                    .getReference("driversOnline")
-                    .child(userId)
-                    .setValue(locationData)
-                    .addOnSuccessListener {
-                        Log.d("MapScreen", "Driver location uploaded successfully")
-                    }
-                    .addOnFailureListener {
-                        Log.e("MapScreen", "Failed to upload driver location", it)
-                    }
-            }
-
-
-        }
-
-        if (role == "rider") {
-            Log.d("MapScreen", "Role: $role")
-            FirebaseDatabase.getInstance().getReference("driversOnline")
-                .addValueEventListener(object : ValueEventListener {
-                override fun onDataChange(snapshot: DataSnapshot) {
-                    drivers.clear()
-                    for (driverSnapshot in snapshot.children) {
-                        val lat = driverSnapshot.child("lat").getValue(Double::class.java)
-                        val lng = driverSnapshot.child("lng").getValue(Double::class.java)
-                        if (lat != null && lng != null) {
-                            drivers.add(driverSnapshot.key!! to LatLng(lat, lng))
-                        }
-                    }
-                    Log.d("MapScreen", "Drivers loaded: ${drivers.size}")
+                // Move the map camera to current location
+                if (shouldFollowUser) {
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(location, 16f)
+                    )
                 }
 
-                override fun onCancelled(error: DatabaseError) {
-                    Log.e("MapScreen", "Driver listener cancelled", error.toException())
-                }
-            })
+                // If user is a driver, update location in Firebase
+                if (role == "driver") {
+                    val locationData = mapOf(
+                        "lat" to location.latitude,
+                        "lng" to location.longitude,
+                        "timestamp" to System.currentTimeMillis()
+                    )
 
-            FirebaseDatabase.getInstance().getReference("trips")
-                .orderByChild("riderId")
-                .equalTo(userId)
-                .addChildEventListener(object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        val status = snapshot.child("status").getValue(String::class.java)
-                        if (status == "accepted") {
-                            Log.d("RiderTrip", "Driver accepted the trip!")
-                            incomingTrip = snapshot
+                    Log.d(
+                        "MapScreen",
+                        "Uploading driver location for userId=$userId: $locationData"
+                    )
+
+                    FirebaseDatabase.getInstance()
+                        .getReference("driversOnline")
+                        .child(userId)
+                        .setValue(locationData)
+                        .addOnSuccessListener {
+                            Log.d("MapScreen", "Driver location uploaded successfully")
                         }
-                    }
+                        .addOnFailureListener {
+                            Log.e("MapScreen", "Failed to upload driver location", it)
+                        }
+                }
 
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        val status = snapshot.child("status").getValue(String::class.java)
-                        Log.d("TripMatch", "Trip status changed to: $status")
 
-                        when (status) {
-                            "accepted", "in_progress" -> incomingTrip = snapshot
-                            "completed" -> {
-                                completedTrip = snapshot
-                                Log.d("TripCancelDebug", "incomingTrip manually set to null")
-                                incomingTrip = null // Automatically clear the trip once completed
+            }
+
+            if (role == "rider") {
+                Log.d("MapScreen", "Role: $role")
+                FirebaseDatabase.getInstance().getReference("driversOnline")
+                    .addValueEventListener(object : ValueEventListener {
+                        override fun onDataChange(snapshot: DataSnapshot) {
+                            drivers.clear()
+                            for (driverSnapshot in snapshot.children) {
+                                val lat = driverSnapshot.child("lat").getValue(Double::class.java)
+                                val lng = driverSnapshot.child("lng").getValue(Double::class.java)
+                                if (lat != null && lng != null) {
+                                    drivers.add(driverSnapshot.key!! to LatLng(lat, lng))
+                                }
+                            }
+                            Log.d("MapScreen", "Drivers loaded: ${drivers.size}")
+                        }
+
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.e("MapScreen", "Driver listener cancelled", error.toException())
+                        }
+                    })
+
+                FirebaseDatabase.getInstance().getReference("trips")
+                    .orderByChild("riderId")
+                    .equalTo(userId)
+                    .addChildEventListener(object : ChildEventListener {
+                        override fun onChildAdded(
+                            snapshot: DataSnapshot,
+                            previousChildName: String?
+                        ) {
+                            val status = snapshot.child("status").getValue(String::class.java)
+                            if (status == "accepted") {
+                                Log.d("RiderTrip", "Driver accepted the trip!")
+                                incomingTrip = snapshot
                             }
                         }
-                    }
 
-                    override fun onChildRemoved(snapshot: DataSnapshot) {}
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e("RiderTrip", "Trip listener cancelled", error.toException())
-                    }
-                })
-        }
-    }
+                        override fun onChildChanged(
+                            snapshot: DataSnapshot,
+                            previousChildName: String?
+                        ) {
+                            val status = snapshot.child("status").getValue(String::class.java)
+                            Log.d("TripMatch", "Trip status changed to: $status")
 
-    // Stop updates when leaving screen
-    DisposableEffect(Unit) {
-        onDispose {
-            locationTracker.stopListening()
-            if (role == "driver") {
-                databaseRef.child(userId).removeValue()
+                            when (status) {
+                                "accepted", "in_progress" -> incomingTrip = snapshot
+                                "completed" -> {
+                                    completedTrip = snapshot
+                                    Log.d("TripCancelDebug", "incomingTrip manually set to null")
+                                    incomingTrip =
+                                        null // Automatically clear the trip once completed
+                                }
+                            }
+                        }
+
+                        override fun onChildRemoved(snapshot: DataSnapshot) {}
+                        override fun onChildMoved(
+                            snapshot: DataSnapshot,
+                            previousChildName: String?
+                        ) {
+                        }
+
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.e("RiderTrip", "Trip listener cancelled", error.toException())
+                        }
+                    })
             }
         }
-    }
 
-    //Box(modifier = Modifier.fillMaxSize()) {
-        // Show map
+        // Stop updates when leaving screen
+        DisposableEffect(Unit) {
+            onDispose {
+                locationTracker.stopListening()
+                if (role == "driver") {
+                    databaseRef.child(userId).removeValue()
+                }
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            LaunchedEffect(routeToDestination) {
+                if (routeToDestination.isNotEmpty()) {
+                    val center = routeToDestination[routeToDestination.size / 2]
+                    Log.d("DebugCamera", "Moving camera to center of route: $center")
+                    cameraPositionState.move(
+                        CameraUpdateFactory.newLatLngZoom(center, 15f)
+                    )
+                }
+            }
+
+
+            // Show map
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
@@ -367,67 +408,73 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                 }
             },
             content = {
-            // Rider marker
-            userLocation?.let {
-                Marker(
-                    state = MarkerState(position = it),
-                    title = if (role == "rider") "You are here" else "Driver location",
-                    icon = bitmapDescriptorFromVector(
-                        context,
-                        if (role == "rider") R.drawable.rider_icon else R.drawable.driver_icon
-                    )
-                )
-            }
-
-            // Destination marker
-            if (role == "rider" && selectedDestination != null) {
-                Marker(
-                    state = MarkerState(position = selectedDestination!!),
-                    title = "Destination",
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
-                )
-            }
-
-            // Driver markers
-                if (role == "rider") {
-                drivers.forEach { (id, position) ->
+                // Rider marker
+                userLocation?.let {
                     Marker(
-                        state = MarkerState(position = position),
-                        title = "Driver: $id",
-                        icon = bitmapDescriptorFromVector(context, R.drawable.driver_icon)
+                        state = MarkerState(position = it),
+                        title = if (role == "rider") "You are here" else "Driver location",
+                        icon = bitmapDescriptorFromVector(
+                            context,
+                            if (role == "rider") R.drawable.rider_icon else R.drawable.driver_icon
+                        )
                     )
                 }
-            }
 
-            selectedDestination?.let {
-                Marker(
-                    state = MarkerState(position = it),
-                    title = "Selected Destination",
-                    icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
-                )
-            }
+                // Destination marker
+                if (role == "rider" && selectedDestination != null) {
+                    Marker(
+                        state = MarkerState(position = selectedDestination!!),
+                        title = "Destination",
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
+                    )
+                }
+
+                // Driver markers
+                if (role == "rider") {
+                    drivers.forEach { (id, position) ->
+                        Marker(
+                            state = MarkerState(position = position),
+                            title = "Driver: $id",
+                            icon = bitmapDescriptorFromVector(context, R.drawable.driver_icon)
+                        )
+                    }
+                }
+
+                selectedDestination?.let {
+                    Marker(
+                        state = MarkerState(position = it),
+                        title = "Selected Destination",
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
+                    )
+                }
 
                 // Route: Driver to Pickup (solid blue)
                 if (routeToPickup.isNotEmpty()) {
+                    Log.d("PolylineDraw", "Drawing routeToPickup with ${routeToPickup.size} points")
                     Polyline(
                         points = routeToPickup,
-                        color = Color.Blue,
-                        width = 8f
+                        color = Color.Red, // color = Color.Blue,
+                        width = 12f, // width = 8f
+                        pattern = null
                     )
                 }
 
                 // Route: Pickup to Destination (dashed green)
                 if (routeToDestination.isNotEmpty()) {
-                    Log.d("PolylineCheckReturnToMapScreen", "Driver routeToDestination size: ${routeToDestination.size}")
+                    Log.d(
+                        "PolylineDraw",
+                        "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
+                    )
                     Polyline(
                         points = routeToDestination,
-                        color = Color.Green,
-                        width = 8f,
-                        pattern = listOf(Dot(), Gap(10f)) // Dashed line
+                        color = Color.Magenta, // Color.Green,
+                        width = 20f, // 8f,
+                        pattern = null // listOf(Dot(), Gap(10f)) // Dashed line
                     )
                 }
-        }
+            }
         )
+    }
 
         // Request Pickup Button (only for riders)
         if (role == "rider") {
@@ -444,7 +491,7 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                     Log.d("Places", "Autocomplete canceled")
                 }
             }
-
+/*
             if (incomingTrip != null && incomingTrip?.key != null) {
                 Button(
                     onClick = {
@@ -457,6 +504,8 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                     Text("Message")
                 }
             }
+
+ */
 
             // Set Destination button
             Button(
@@ -535,7 +584,7 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                                     if (!polyline.isNullOrEmpty()) {
                                         val decoded = decodePolyline(polyline)
                                         withContext(Dispatchers.Main) {
-                                            routeToDestination = decoded
+                                            viewModel.updateRouteToDestination(decoded)
 
                                             if (decoded.isNotEmpty()) {
                                                 val boundsBuilder = LatLngBounds.builder()
@@ -561,6 +610,7 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                 }
 
                 Log.d("TripUI", "Rendering IncomingTripCard for tripId=${trip.key}")
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -585,8 +635,8 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                         },
 
                          */
-                        onRouteToPickupDecoded = { routeToPickup = it },
-                        onRouteToDestinationDecoded = { routeToDestination = it },
+                        onRouteToPickupDecoded = { viewModel.updateRouteToPickup(it) },
+                        onRouteToDestinationDecoded = { viewModel.updateRouteToDestination(it) },
                         onAccept = {
                             trip.ref.child("status").setValue("accepted")
                             Log.d("TripMatch", "Trip accepted by driver")
@@ -601,14 +651,15 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                         onComplete = {
                             Log.d("TripCancelDebug", "incomingTrip manually set to null")
                             incomingTrip = null
-                            routeToPickup = emptyList()
-                            routeToDestination = emptyList()
+                            viewModel.clearRoutes()
                         },
                         disableCameraFollow = { shouldFollowUser = false },
                         navController = navController,
-                        userId = userId
+                        userId = userId,
+                        viewModel = viewModel
                     )
                 }
+
             }
         }
 
@@ -620,6 +671,46 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                     val pickupLng = trip.child("riderLng").getValue(Double::class.java)
                     val destLat = trip.child("destinationLat").getValue(Double::class.java)
                     val destLng = trip.child("destinationLng").getValue(Double::class.java)
+
+                    // Fetch route to Pickup destination, for the rider
+                    LaunchedEffect(trip.key + role) {
+                        val driverLat = trip.child("driverLat").getValue(Double::class.java)
+                        val driverLng = trip.child("driverLng").getValue(Double::class.java)
+                        val riderLat = trip.child("riderLat").getValue(Double::class.java)
+                        val riderLng = trip.child("riderLng").getValue(Double::class.java)
+
+                        if (driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                            val origin = "$driverLat,$driverLng"
+                            val destination = "$riderLat,$riderLng"
+
+                            Log.d("RouteToPickup", "Rider fetching routeToPickup: $origin → $destination")
+
+                            try {
+                                val response = DirectionsClient.service.getRoute(
+                                    origin = origin,
+                                    destination = destination,
+                                    apiKey = "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI"
+                                )
+
+                                if (response.isSuccessful) {
+                                    val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                    if (!polyline.isNullOrEmpty()) {
+                                        val decoded = decodePolyline(polyline)
+                                        Log.d("RouteToPickup", "Rider decoded ${decoded.size} points")
+                                        viewModel.updateRouteToPickup(decoded)
+                                    } else {
+                                        Log.w("RouteToPickup", "No polyline found")
+                                    }
+                                } else {
+                                    Log.e("RouteToPickup", "API error: ${response.code()} ${response.message()}")
+                                }
+                            } catch (e: Exception) {
+                                Log.e("RouteToPickup", "Error fetching route: ${e.message}", e)
+                            }
+                        }
+                    }
+
+                    Log.d("RiderRouteCheck", "incomingTrip = ${trip.key}, status = $status")
 
                     LaunchedEffect(trip.key) {
                         if (pickupLat != null && pickupLng != null && destLat != null && destLng != null) {
@@ -640,7 +731,17 @@ fun MapScreen(userId: String, role: String, navController: NavController) {
                                     if (!polyline.isNullOrEmpty()) {
                                         val decoded = decodePolyline(polyline)
                                         Log.d("RouteToDestination", "Rider decoded ${decoded.size} points")
-                                        routeToDestination = decoded
+                                        viewModel.updateRouteToDestination(decoded)
+
+                                        if (decoded.isNotEmpty()) {
+                                            val boundsBuilder = LatLngBounds.builder()
+                                            decoded.forEach { boundsBuilder.include(it) }
+                                            val bounds = boundsBuilder.build()
+
+                                            cameraPositionState.move(
+                                                CameraUpdateFactory.newLatLngBounds(bounds, 100)
+                                            )
+                                        }
                                     } else {
                                         Log.w("RouteToDestination", "Rider: no polyline found")
                                     }
@@ -787,7 +888,8 @@ fun IncomingTripCard(
     onRouteToPickupDecoded: (List<LatLng>) -> Unit,
     onRouteToDestinationDecoded: (List<LatLng>) -> Unit,
     navController: NavController,
-    userId: String
+    userId: String,
+    viewModel: MapViewModel
 ) {
     Log.d("TripUI", "Trip popup triggered for rider: ${trip.child("riderId").value}")
     val riderId = trip.child("riderId").getValue(String::class.java) ?: "Unknown"
@@ -836,7 +938,9 @@ fun IncomingTripCard(
                                         val decoded = decodePolyline(polyline)
                                         Log.d("RouteDraw", "Decoded polyline has ${decoded.size} points")
 
-                                        onRouteToPickupDecoded(decoded)
+                                        // onRouteToPickupDecoded(decoded)
+                                        viewModel.updateRouteToDestination(decoded)
+
                                     } else {
                                         Log.w("RouteDraw", "No polyline found")
                                     }
@@ -885,6 +989,7 @@ fun IncomingTripCard(
                         Text("Start Trip")
                     }
 
+/*
                     // Message Button
                     Button(
                         onClick = {
@@ -901,6 +1006,8 @@ fun IncomingTripCard(
                     ) {
                         Text("Message")
                     }
+
+ */
                 }
 
                 // Optionally show route or completion
@@ -939,7 +1046,8 @@ fun IncomingTripCard(
                                                 "Decoded polyline: ${decoded.size} points"
                                             )
                                             withContext(Dispatchers.Main) {
-                                                onRouteToDestinationDecoded(decoded)
+                                                // onRouteToDestinationDecoded(decoded)
+                                                viewModel.updateRouteToPickup(decoded)
                                             }
                                         } else {
                                             Log.w("RouteToDestination", "No polyline found")
@@ -991,6 +1099,7 @@ fun IncomingTripCard(
                     Text("Complete Trip")
                 }
 
+                    /*
                     // Message Button
                     Button(
                         onClick = {
@@ -1007,6 +1116,8 @@ fun IncomingTripCard(
                     ) {
                         Text("Message")
                     }
+
+                     */
             }
             }
             }

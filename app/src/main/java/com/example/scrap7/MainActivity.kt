@@ -169,6 +169,8 @@ fun MyApp() {
             MapScreen(userId = userId, role = role, navController = navController)
         }
 
+        /*
+        // Navigate to Message screen
         composable(
             "chat/{tripId}/{userId}",
             arguments = listOf(
@@ -180,6 +182,8 @@ fun MyApp() {
             val userId = backStackEntry.arguments?.getString("userId") ?: ""
             ChatScreen(tripId = tripId, userId = userId)
         }
+
+         */
 
     }
 }
