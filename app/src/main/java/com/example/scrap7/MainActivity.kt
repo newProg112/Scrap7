@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity()/*FragmentActivity() */ {
 
         // Initialize the Places SDK
         if (!Places.isInitialized()) {
-            Places.initialize(applicationContext, "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI")
+            Places.initialize(applicationContext, Keys.MAPS_API_KEY)
         }
 
         Log.d("FirebaseTest", "FirebaseApp initialized: ${FirebaseApp.getApps(this).isNotEmpty()}")
@@ -149,6 +149,7 @@ fun MyApp() {
 @Composable
 fun MyApp() {
     val navController = rememberNavController()
+    val  mapViewModel: MapViewModel = viewModel()
 
     NavHost(navController, startDestination = "login") {
         composable("login") {
@@ -166,10 +167,14 @@ fun MyApp() {
         ) { backStackEntry ->
             val userId = backStackEntry.arguments?.getString("userId") ?: ""
             val role = backStackEntry.arguments?.getString("role") ?: "rider"
-            MapScreen(userId = userId, role = role, navController = navController)
+            MapScreen(
+                userId = userId,
+                role = role,
+                navController = navController,
+                viewModel = mapViewModel
+            )
         }
 
-        /*
         // Navigate to Message screen
         composable(
             "chat/{tripId}/{userId}",
@@ -180,10 +185,13 @@ fun MyApp() {
         ) { backStackEntry ->
             val tripId = backStackEntry.arguments?.getString("tripId") ?: ""
             val userId = backStackEntry.arguments?.getString("userId") ?: ""
-            ChatScreen(tripId = tripId, userId = userId)
+            ChatScreen(
+                tripId = tripId,
+                userId = userId,
+                viewModel = mapViewModel,
+                onBack = { navController.popBackStack() }
+            )
         }
-
-         */
 
     }
 }

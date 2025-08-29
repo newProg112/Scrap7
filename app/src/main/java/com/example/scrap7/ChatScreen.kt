@@ -24,7 +24,12 @@ import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
 
 @Composable
-fun ChatScreen(tripId: String, userId: String) {
+fun ChatScreen(
+    tripId: String,
+    userId: String,
+    viewModel: MapViewModel,
+    onBack: () -> Unit = {}
+) {
     val messages = remember { mutableStateListOf<Message>() }
     val messageText = remember { mutableStateOf("") }
 
