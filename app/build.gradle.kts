@@ -1,3 +1,6 @@
+import com.android.build.gradle.internal.cxx.configure.gradleLocalProperties
+val mapsKey = gradleLocalProperties(rootDir, providers).getProperty("MAPS_API_KEY") ?: ""
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -21,18 +24,25 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        manifestPlaceholders["googleMapsKey"] = "AIzaSyA3vVBo46hVzhCKM-LDK_4KMEhfsFQeRwI"
+        manifestPlaceholders["googleMapsKey"] = mapsKey
     }
 
     buildTypes {
-        release {
+        getByName("debug") {
+            // ⚠️ Temporary: use your debug key here
+            buildConfigField("String", "MAPS_API_KEY", "\"$mapsKey\"")
+        }
+        getByName("release") {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // ⚠️ Temporary: same key; swap to a real release key when you have one
+            buildConfigField("String", "MAPS_API_KEY", "\"$mapsKey\"")
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
@@ -42,6 +52,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+app/src/main/java/com/example/scrap7/Keys.kt
+**/com/example/scrap7/Keys.kt
+app/src/main/kotlin/com/example/scrap7/Keys.kt
+.idea/
