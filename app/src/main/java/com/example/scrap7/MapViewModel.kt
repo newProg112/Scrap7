@@ -26,6 +26,13 @@ class MapViewModel : ViewModel() {
     var destination by mutableStateOf<LatLng?>(null)
     private set
 
+    // --- Unread badge state ---
+    var unreadCount by mutableStateOf(0)
+    private set
+
+    var lastRead by mutableStateOf(0L)
+    private set
+
     fun setTrip(pickup: LatLng, destination: LatLng) {
         this.pickup = pickup
         this.destination = destination
@@ -85,6 +92,25 @@ class MapViewModel : ViewModel() {
             } catch (e: Exception) {
                 Log.e("VMRouteFetch", "Error: ${e.message}", e)
             }
+        }
+    }
+
+    /** Set a baseline so we don't count all historical messages on first attach */
+    fun markUnreadBaselineNowIfUnset() {
+        if (lastRead == 0L) lastRead = System.currentTimeMillis()
+    }
+
+    /** Clear badge and mark this moment as read */
+    fun clearUnread() {
+        unreadCount = 0
+        lastRead = System.currentTimeMillis()
+    }
+
+    /** Increment badge for messages from the other user that arrived after lastRead */
+    fun bumpUnreadIfNeeded(senderId: String?, timestamp: Long?, currentUserId: String) {
+        if (senderId == null || timestamp == null) return
+        if (senderId != currentUserId && timestamp > lastRead) {
+            unreadCount++
         }
     }
 }
