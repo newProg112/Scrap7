@@ -22,10 +22,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Place
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -466,6 +469,32 @@ fun MapScreen(
                 }
             }
 
+            // Bump unread when new messages arrive from the *other* user
+            DisposableEffect(incomingTrip?.key, userId) {
+                val tripId = incomingTrip?.key
+                if (tripId == null) {
+                    onDispose { }
+                } else {
+                    // Set a baseline so existing history doesn't count as unread
+                    viewModel.markUnreadBaselineNowIfUnset()
+
+                    val ref = FirebaseDatabase.getInstance().getReference("messages").child(tripId)
+                    val listener = object : ChildEventListener {
+                        override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                            // Expecting your Message data class with senderId:String? and timeStamp:Long?
+                            val msg = snapshot.getValue(Message::class.java)
+                            viewModel.bumpUnreadIfNeeded(msg?.senderId, msg?.timeStamp, userId)
+                        }
+                        override fun onCancelled(error: DatabaseError) {}
+                        override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+                        override fun onChildRemoved(snapshot: DataSnapshot) {}
+                        override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+                    }
+                    ref.addChildEventListener(listener)
+                    onDispose { ref.removeEventListener(listener) }
+                }
+            }
+
             // Only fetch a leg the first time pickup/destination are known AND no polyline is cached yet
             LaunchedEffect(viewModel.pickup, viewModel.destination) {
                 val alreadyHasRoute = viewModel.routeToPickup.isNotEmpty() || viewModel.routeToDestination.isNotEmpty()
@@ -593,7 +622,32 @@ fun MapScreen(
                 }
             }
         )
-    }
+
+            if (incomingTrip?.key != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp)
+                ) {
+                    BadgedBox(
+                        badge = {
+                            val count = viewModel.unreadCount
+                            if (count > 0) Badge { Text(if (count > 9) "9+" else "$count") }
+                        }
+                    ) {
+                        FloatingActionButton(
+                            onClick = {
+                                viewModel.clearUnread() // reset badge before navigating
+                                navController.navigate("chat/${incomingTrip?.key ?: ""}/$userId")
+                            }
+                        ) {
+                            Text("Chat")
+                        }
+                    }
+                }
+            }
+
+        }
 
         // Request Pickup Button (only for riders)
         if (role == "rider") {
@@ -610,20 +664,6 @@ fun MapScreen(
                     Log.d("Places", "Autocomplete canceled")
                 }
             }
-
-            if (incomingTrip != null && incomingTrip?.key != null) {
-                Button(
-                    onClick = {
-                        navController.navigate("chat/${incomingTrip?.key}/$userId")
-                    },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 128.dp)
-                ) {
-                    Text("Message")
-                }
-            }
-
 
             // Set Destination button
             Button(
