@@ -3,9 +3,11 @@ package com.example.scrap7
 import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.location.Location
+import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,7 +50,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
@@ -61,6 +67,7 @@ import com.google.firebase.database.ChildEventListener
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
@@ -231,56 +238,71 @@ fun MapScreen(
                                 Log.d("TripRestore", "Restoring active trip: ${tripSnapshot.key}")
                                 incomingTrip = tripSnapshot
 
-                                // Re-fetch route
-                                val pickupLat = tripSnapshot.child("riderLat").getValue(Double::class.java)
-                                val pickupLng = tripSnapshot.child("riderLng").getValue(Double::class.java)
-                                val destLat = tripSnapshot.child("destinationLat").getValue(Double::class.java)
-                                val destLng = tripSnapshot.child("destinationLng").getValue(Double::class.java)
+                                // Re-fetch the correct leg based on status
+                                val statusNow = tripSnapshot.child("status").getValue(String::class.java)
 
-                                if (pickupLat != null && pickupLng != null && destLat != null && destLng != null) {
-                                    val origin = "$pickupLat,$pickupLng"
-                                    val destination = "$destLat,$destLng"
-
-                                    Log.d("TripRestore", "Fetching route again: origin=$origin, destination=$destination")
-
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        try {
-                                            val response = DirectionsClient.service.getRoute(
-                                                origin = origin,
-                                                destination = destination,
-                                                apiKey = Keys.MAPS_API_KEY
-                                            )
-
-                                            if (response.isSuccessful) {
-                                                val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
-                                                if (!polyline.isNullOrEmpty()) {
-                                                    val decoded = decodePolyline(polyline)
-                                                    Log.d("TripRestore", "Decoded polyline: ${decoded.size} points")
-                                                    withContext(Dispatchers.Main) {
-                                                        viewModel.updateRouteToDestination(decoded)
-
-                                                        if (decoded.isNotEmpty()) {
-                                                            val boundsBuilder = LatLngBounds.builder()
-                                                            decoded.forEach { boundsBuilder.include(it) }
-                                                            val bounds = boundsBuilder.build()
-
-                                                            cameraPositionState.move(
-                                                                CameraUpdateFactory.newLatLngBounds(bounds, 100)
-                                                            )
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    try {
+                                        if (statusNow == "accepted") {
+                                            // DRIVER → RIDER
+                                            val dLat = tripSnapshot.child("driverLat").getValue(Double::class.java)
+                                            val dLng = tripSnapshot.child("driverLng").getValue(Double::class.java)
+                                            val rLat = tripSnapshot.child("riderLat").getValue(Double::class.java)
+                                            val rLng = tripSnapshot.child("riderLng").getValue(Double::class.java)
+                                            if (dLat != null && dLng != null && rLat != null && rLng != null) {
+                                                val response = DirectionsClient.service.getRoute(
+                                                    origin = "$dLat,$dLng",
+                                                    destination = "$rLat,$rLng",
+                                                    apiKey = Keys.MAPS_API_KEY
+                                                )
+                                                if (response.isSuccessful) {
+                                                    val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                                    if (!polyline.isNullOrEmpty()) {
+                                                        val decoded = decodePolyline(polyline)
+                                                        withContext(Dispatchers.Main) {
+                                                            viewModel.updateRouteToPickup(decoded)
+                                                            // baseline throttle from the same origin you used
+                                                            viewModel.markRouteRecalculated(LatLng(dLat, dLng))
                                                         }
+                                                    } else {
+                                                        Log.w("TripRestore", "No polyline for driver→pickup")
                                                     }
                                                 } else {
-                                                    Log.w("TripRestore", "No polyline found")
+                                                    Log.e("TripRestore", "API error: ${response.code()} ${response.message()}")
                                                 }
-                                            } else {
-                                                Log.e("TripRestore", "API error: ${response.code()} ${response.message()}")
                                             }
-                                        } catch (e: Exception) {
-                                            Log.e("TripRestore", "Route fetch failed: ${e.message}", e)
+                                        } else if (statusNow == "in_progress") {
+                                            // PICKUP → DESTINATION
+                                            val rLat = tripSnapshot.child("riderLat").getValue(Double::class.java)
+                                            val rLng = tripSnapshot.child("riderLng").getValue(Double::class.java)
+                                            val destLat = tripSnapshot.child("destinationLat").getValue(Double::class.java)
+                                            val destLng = tripSnapshot.child("destinationLng").getValue(Double::class.java)
+                                            if (rLat != null && rLng != null && destLat != null && destLng != null) {
+                                                val response = DirectionsClient.service.getRoute(
+                                                    origin = "$rLat,$rLng",
+                                                    destination = "$destLat,$destLng",
+                                                    apiKey = Keys.MAPS_API_KEY
+                                                )
+                                                if (response.isSuccessful) {
+                                                    val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                                    if (!polyline.isNullOrEmpty()) {
+                                                        val decoded = decodePolyline(polyline)
+                                                        withContext(Dispatchers.Main) {
+                                                            viewModel.updateRouteToDestination(decoded)
+                                                            viewModel.markRouteRecalculated(LatLng(rLat, rLng))
+                                                        }
+                                                    } else {
+                                                        Log.w("TripRestore", "No polyline for pickup→destination")
+                                                    }
+                                                } else {
+                                                    Log.e("TripRestore", "API error: ${response.code()} ${response.message()}")
+                                                }
+                                            }
                                         }
+                                    } catch (e: Exception) {
+                                        Log.e("TripRestore", "Route fetch failed: ${e.message}", e)
                                     }
                                 }
-
                             }
                         }
                     }
@@ -433,7 +455,7 @@ fun MapScreen(
                         incomingTrip?.let { trip ->
                             val status = trip.child("status").getValue(String::class.java)
 
-                            if (status == "accepted" || status == "in_progress") {
+                            if (status == "accepted") {
                                 if (role == "driver") {
                                     val driverLat = trip.child("driverLat").getValue(Double::class.java)
                                     val driverLng = trip.child("driverLng").getValue(Double::class.java)
@@ -441,14 +463,27 @@ fun MapScreen(
                                     val riderLng = trip.child("riderLng").getValue(Double::class.java)
 
                                     if (driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                                        val tripId = trip.key ?: return@let
                                         viewModel.fetchRoute(
                                             origin = "$driverLat,$driverLng",
                                             destination = "$riderLat,$riderLng",
-                                            onRouteDecoded = viewModel::updateRouteToPickup
+                                            onRouteDecoded = { decoded ->
+                                                viewModel.updateRouteToPickup(decoded)
+                                                viewModel.markRouteRecalculated(
+                                                    com.google.android.gms.maps.model.LatLng(driverLat, driverLng)
+                                                )
+                                            },
+                                            onEncoded = { encoded ->
+                                                FirebaseDatabase.getInstance()
+                                                    .getReference("trips").child(tripId)
+                                                    .child("history").child("toPickupPolyline")
+                                                    .setValue(encoded)
+                                            }
                                         )
                                     }
                                 }
 
+                                /*
                                 if (role == "rider") {
                                     val driverLat = trip.child("driverLat").getValue(Double::class.java)
                                     val driverLng = trip.child("driverLng").getValue(Double::class.java)
@@ -456,17 +491,320 @@ fun MapScreen(
                                     val riderLng = trip.child("riderLng").getValue(Double::class.java)
 
                                     if (driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                                        val tripId = trip.key ?: return@let
                                         viewModel.fetchRoute(
                                             origin = "$driverLat,$driverLng",
                                             destination = "$riderLat,$riderLng",
-                                            onRouteDecoded = viewModel::updateRouteToPickup
+                                            onRouteDecoded = { decoded ->
+                                                viewModel.updateRouteToPickup(decoded)
+                                                viewModel.markRouteRecalculated(
+                                                    com.google.android.gms.maps.model.LatLng(driverLat, driverLng)
+                                                )
+                                            },
+                                            onEncoded = { encoded ->
+                                                FirebaseDatabase.getInstance()
+                                                    .getReference("trips").child(tripId)
+                                                    .child("history").child("toPickupPolyline")
+                                                    .setValue(encoded)
+                                            }
                                         )
+                                    }
+                                }
+                                */
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-route from the current driver position when they've moved enough / after a small time window
+            LaunchedEffect(viewModel.driverPosition, incomingTrip?.key) {
+                val pos = viewModel.driverPosition ?: return@LaunchedEffect
+                val status = incomingTrip?.child("status")?.getValue(String::class.java) ?: return@LaunchedEffect
+
+                // Debug: see when we evaluate & whether we allow a recalc
+                val allow = viewModel.shouldRecalcRoute(pos, minMeters = 20f, minIntervalMs = 7_000L) // lower for quick testing
+                android.util.Log.d("DriverPosReRoute", "pos=$pos status=$status allow=$allow")
+
+                if (!allow) return@LaunchedEffect
+
+                when (status) {
+                    "accepted" -> {
+                        // keep both rider & driver live for the pickup lef (so rider sees driver approaching)
+                        val rLat = incomingTrip?.child("riderLat")?.getValue(Double::class.java)
+                        val rLng = incomingTrip?.child("riderLng")?.getValue(Double::class.java)
+                        if (rLat != null && rLng != null) {
+                            android.util.Log.d("DriverPosReRoute", "Recalc driver->pickup")
+                            viewModel.fetchRoute(
+                                origin = "${pos.latitude},${pos.longitude}",
+                                destination = "$rLat,$rLng",
+                                onRouteDecoded = { decoded ->
+                                    viewModel.updateRouteToPickup(decoded)
+                                    viewModel.markRouteRecalculated(pos)
+                                    android.util.Log.d("DriverPosReRoute", "New polyline points=${decoded.size}")
+                                }
+                            )
+                        }
+                    }
+                    "in_progress" -> {
+                        // Re-route for BOTH roles using the live vehicle position (driverPosition) -> destination
+                        val dLat = incomingTrip?.child("destinationLat")?.getValue(Double::class.java)
+                        val dLng = incomingTrip?.child("destinationLng")?.getValue(Double::class.java)
+                        if (dLat != null && dLng != null) {
+                            android.util.Log.d("DriverPosReRoute", "Recalc pickup->destination")
+                            viewModel.fetchRoute(
+                                origin = "${pos.latitude},${pos.longitude}",  // live vehicle position
+                                destination = "$dLat,$dLng",
+                                onRouteDecoded = { decoded ->
+                                    viewModel.updateRouteToDestination(decoded)
+                                    viewModel.markRouteRecalculated(pos)
+                                    android.util.Log.d("DriverPosReRoute", "New polyline points=${decoded.size}")
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            DisposableEffect(role, incomingTrip?.key, userId, context) {
+                // Only the DRIVER mirrors location into the active trip
+                val tripId = incomingTrip?.key
+                if (role != "driver" || tripId == null) {
+                    onDispose { }
+                } else {
+                    // Permission guard (avoid crash if location isn't granted)
+                    val hasFine = ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!hasFine) return@DisposableEffect onDispose { }
+
+                    val fused = LocationServices.getFusedLocationProviderClient(context)
+
+                    val tripsRef   = FirebaseDatabase.getInstance().getReference("trips").child(tripId)
+                    val onlineRef  = FirebaseDatabase.getInstance().getReference("driversOnline").child(userId)
+
+                    // ~2s desired interval; min 1s between updates
+                    val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
+                        .setMinUpdateIntervalMillis(1000L)
+                        .build()
+
+                    var running = false
+                    val callback = object : LocationCallback() {
+                        private var lastSentMs = 0L
+                        override fun onLocationResult(result: LocationResult) {
+                            val loc = result.lastLocation ?: return
+                            val now = System.currentTimeMillis()
+                            if (now - lastSentMs < 1000L) return   // throttle 1s
+                            lastSentMs = now
+
+                            val lat = loc.latitude
+                            val lng = loc.longitude
+
+                            // Mirror into the trip (rider will listen to this)
+                            tripsRef.updateChildren(mapOf(
+                                "driverLat" to lat,
+                                "driverLng" to lng
+                            ))
+                            // Keep your existing presence path updated too (optional)
+                            onlineRef.updateChildren(mapOf(
+                                "lat" to lat,
+                                "lng" to lng,
+                                "lastUpdated" to ServerValue.TIMESTAMP
+                            ))
+
+                            android.util.Log.d("TripPosWrite", "trip=$tripId lat=$lat lng=$lng")
+                        }
+                    }
+
+                    // Start/stop location updates based on trip status
+                    val statusListener = object : ValueEventListener {
+                        override fun onDataChange(snap: DataSnapshot) {
+                            val status = snap.child("status").getValue(String::class.java)
+                            val shouldRun = status == "accepted" || status == "in_progress"
+
+                            // Check either FINE or COARSE location permission
+                            val hasLocationPermission =
+                                ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+                            if (shouldRun && !running) {
+                                if (!hasLocationPermission) {
+                                    android.util.Log.w("TripPosWrite", "No location permission; not starting updates")
+                                    return
+                                }
+                                try {
+                                    fused.requestLocationUpdates(request, callback, Looper.getMainLooper())
+                                    running = true
+                                    android.util.Log.d("TripPosWrite", "Started location updates (status=$status)")
+                                } catch (se: SecurityException) {
+                                    android.util.Log.e("TripPosWrite", "Permission error starting updates", se)
+                                }
+                            } else if (!shouldRun && running) {
+                                try {
+                                    fused.removeLocationUpdates(callback)
+                                } catch (se: SecurityException) {
+                                    android.util.Log.e("TripPosWrite", "Permission error stopping updates", se)
+                                } finally {
+                                    running = false
+                                    android.util.Log.d("TripPosWrite", "Stopped location updates (status=$status)")
+                                }
+                            }
+                        }
+                        override fun onCancelled(error: DatabaseError) {
+                            android.util.Log.e("TripPosWrite", "status listener cancelled: ${error.message}")
+                        }
+                    }
+
+                    // Attach status listener
+                    tripsRef.addValueEventListener(statusListener)
+
+                    // Clean up on leaving screen or trip/role change
+                    onDispose {
+                        tripsRef.removeEventListener(statusListener)
+                        if (running) fused.removeLocationUpdates(callback)
+                    }
+                }
+            }
+
+            DisposableEffect(incomingTrip?.key) {
+                val tripId = incomingTrip?.key ?: return@DisposableEffect onDispose { }
+                val ref = FirebaseDatabase.getInstance()
+                    .getReference("trips")
+                    .child(tripId)
+
+                val listener = object : ValueEventListener {
+                    override fun onDataChange(snap: DataSnapshot) {
+                        // --- status + clear non-active leg ---
+                        val status = snap.child("status").getValue(String::class.java)
+                        android.util.Log.d("TripListen", "status=$status")
+
+                        if (status == "in_progress" && viewModel.routeToPickup.isNotEmpty()) {
+                            viewModel.clearRouteToPickup()
+                        }
+                        if (status == "accepted" && viewModel.routeToDestination.isNotEmpty()) {
+                            viewModel.clearRouteToDestination()
+                        }
+                        if (status == "completed" || status == "cancelled") {
+                            viewModel.clearRouteToPickup()
+                            viewModel.clearRouteToDestination()
+                        }
+
+                        // --- live driver position for re-route + rider marker ---
+                        val dLat = snap.child("driverLat").getValue(Double::class.java)
+                        val dLng = snap.child("driverLng").getValue(Double::class.java)
+                        if (dLat != null && dLng != null) {
+                            viewModel.setDriverPosition(dLat, dLng)
+                        }
+
+                        // --- SEED the correct leg ONCE if it's missing ---
+                        when (status) {
+                            "accepted" -> {
+                                if (viewModel.routeToPickup.isEmpty()) {
+                                    val rLat = snap.child("riderLat").getValue(Double::class.java)
+                                    val rLng = snap.child("riderLng").getValue(Double::class.java)
+                                    if (dLat != null && dLng != null && rLat != null && rLng != null) {
+                                        android.util.Log.d("SeedRoute", "Fetching driver->rider")
+                                        // do network off main
+                                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                                            try {
+                                                val resp = DirectionsClient.service.getRoute(
+                                                    origin = "$dLat,$dLng",
+                                                    destination = "$rLat,$rLng",
+                                                    apiKey = Keys.MAPS_API_KEY
+                                                )
+                                                if (resp.isSuccessful) {
+                                                    val enc = resp.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                                    if (!enc.isNullOrEmpty()) {
+                                                        val decoded = decodePolyline(enc)
+                                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                            val wasEmpty = viewModel.routeToPickup.isEmpty()
+                                                            viewModel.updateRouteToPickup(decoded)
+                                                            viewModel.markRouteRecalculated(
+                                                                com.google.android.gms.maps.model.LatLng(dLat, dLng)
+                                                            )
+                                                            android.util.Log.d("SeedRoute", "driver->rider points=${decoded.size}")
+
+                                                            if (wasEmpty && decoded.isNotEmpty()) {
+                                                                val bounds = com.google.android.gms.maps.model.LatLngBounds.builder().apply {
+                                                                    decoded.forEach { include(it) }
+                                                                }.build()
+                                                                cameraPositionState.move(
+                                                                    com.google.android.gms.maps.CameraUpdateFactory.newLatLngBounds(bounds, 100)
+                                                                )
+                                                            }
+                                                        }
+                                                    } else {
+                                                        android.util.Log.w("SeedRoute", "No polyline (driver->rider)")
+                                                    }
+                                                } else {
+                                                    android.util.Log.e("SeedRoute", "API ${resp.code()} ${resp.message()}")
+                                                }
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("SeedRoute", "driver->rider error ${e.message}", e)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "in_progress" -> {
+                                if (viewModel.routeToDestination.isEmpty()) {
+                                    val rLat = snap.child("riderLat").getValue(Double::class.java)
+                                    val rLng = snap.child("riderLng").getValue(Double::class.java)
+                                    val dstLat = snap.child("destinationLat").getValue(Double::class.java)
+                                    val dstLng = snap.child("destinationLng").getValue(Double::class.java)
+                                    if (rLat != null && rLng != null && dstLat != null && dstLng != null) {
+                                        android.util.Log.d("SeedRoute", "Fetching pickup->destination")
+                                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                                            try {
+                                                val resp = DirectionsClient.service.getRoute(
+                                                    origin = "$rLat,$rLng",
+                                                    destination = "$dstLat,$dstLng",
+                                                    apiKey = Keys.MAPS_API_KEY
+                                                )
+                                                if (resp.isSuccessful) {
+                                                    val enc = resp.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                                                    if (!enc.isNullOrEmpty()) {
+                                                        val decoded = decodePolyline(enc)
+                                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                            val wasEmpty = viewModel.routeToDestination.isEmpty()
+                                                            viewModel.updateRouteToDestination(decoded)
+                                                            viewModel.markRouteRecalculated(
+                                                                com.google.android.gms.maps.model.LatLng(rLat, rLng)
+                                                            )
+                                                            android.util.Log.d("SeedRoute", "pickup->dest points=${decoded.size}")
+
+                                                            if (wasEmpty && decoded.isNotEmpty()) {
+                                                                val bounds = com.google.android.gms.maps.model.LatLngBounds.builder().apply {
+                                                                    decoded.forEach { include(it) }
+                                                                }.build()
+                                                                cameraPositionState.move(
+                                                                    com.google.android.gms.maps.CameraUpdateFactory.newLatLngBounds(bounds, 100)
+                                                                )
+                                                            }
+                                                        }
+                                                    } else {
+                                                        android.util.Log.w("SeedRoute", "No polyline (pickup->dest)")
+                                                    }
+                                                } else {
+                                                    android.util.Log.e("SeedRoute", "API ${resp.code()} ${resp.message()}")
+                                                }
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("SeedRoute", "pickup->dest error ${e.message}", e)
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    override fun onCancelled(error: DatabaseError) {
+                        android.util.Log.e("DriverPosListen", "onCancelled: ${error.message}")
+                    }
                 }
+
+                ref.addValueEventListener(listener)
+                onDispose { ref.removeEventListener(listener) }
             }
 
             // Bump unread when new messages arrive from the *other* user
@@ -495,51 +833,49 @@ fun MapScreen(
                 }
             }
 
-            // Only fetch a leg the first time pickup/destination are known AND no polyline is cached yet
-            LaunchedEffect(viewModel.pickup, viewModel.destination) {
-                val alreadyHasRoute = viewModel.routeToPickup.isNotEmpty() || viewModel.routeToDestination.isNotEmpty()
-                val p = viewModel.pickup
-                val d = viewModel.destination
-                if (alreadyHasRoute || p == null || d == null) return@LaunchedEffect
+            // Seed the correct leg once per active trip (don’t depend on viewModel.pickup/destination)
+            LaunchedEffect(incomingTrip?.key) {
+                // If either leg is already drawn, do nothing
+                if (viewModel.routeToPickup.isNotEmpty() || viewModel.routeToDestination.isNotEmpty()) return@LaunchedEffect
 
-                // Decide which leg to fetch based on current trip status
-                val status = incomingTrip?.child("status")?.getValue(String::class.java)
+                val trip = incomingTrip ?: return@LaunchedEffect
+                val status = trip.child("status").getValue(String::class.java) ?: return@LaunchedEffect
 
                 when (status) {
                     "accepted" -> {
-                        // driver -> rider
-                        val driverLat = incomingTrip?.child("driverLat")?.getValue(Double::class.java)
-                        val driverLng = incomingTrip?.child("driverLng")?.getValue(Double::class.java)
-                        val riderLat  = incomingTrip?.child("riderLat")?.getValue(Double::class.java)
-                        val riderLng  = incomingTrip?.child("riderLng")?.getValue(Double::class.java)
-                        if (driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                        val dLat = trip.child("driverLat").getValue(Double::class.java)
+                        val dLng = trip.child("driverLng").getValue(Double::class.java)
+                        val rLat = trip.child("riderLat").getValue(Double::class.java)
+                        val rLng = trip.child("riderLng").getValue(Double::class.java)
+                        if (dLat != null && dLng != null && rLat != null && rLng != null) {
                             viewModel.fetchRoute(
-                                origin = "$driverLat,$driverLng",
-                                destination = "$riderLat,$riderLng",
-                                onRouteDecoded = viewModel::updateRouteToPickup
+                                origin = "$dLat,$dLng",
+                                destination = "$rLat,$rLng",
+                                onRouteDecoded = { decoded ->
+                                    viewModel.updateRouteToPickup(decoded)
+                                    viewModel.markRouteRecalculated(com.google.android.gms.maps.model.LatLng(dLat, dLng))
+                                }
                             )
                         }
                     }
                     "in_progress" -> {
-                        // rider -> destination
-                        val riderLat = incomingTrip?.child("riderLat")?.getValue(Double::class.java)
-                        val riderLng = incomingTrip?.child("riderLng")?.getValue(Double::class.java)
-                        val destLat  = incomingTrip?.child("destinationLat")?.getValue(Double::class.java)
-                        val destLng  = incomingTrip?.child("destinationLng")?.getValue(Double::class.java)
-                        if (riderLat != null && riderLng != null && destLat != null && destLng != null) {
+                        val rLat = trip.child("riderLat").getValue(Double::class.java)
+                        val rLng = trip.child("riderLng").getValue(Double::class.java)
+                        val destLat = trip.child("destinationLat").getValue(Double::class.java)
+                        val destLng = trip.child("destinationLng").getValue(Double::class.java)
+                        if (rLat != null && rLng != null && destLat != null && destLng != null) {
                             viewModel.fetchRoute(
-                                origin = "$riderLat,$riderLng",
+                                origin = "$rLat,$rLng",
                                 destination = "$destLat,$destLng",
-                                onRouteDecoded = viewModel::updateRouteToDestination
+                                onRouteDecoded = { decoded ->
+                                    viewModel.updateRouteToDestination(decoded)
+                                    viewModel.markRouteRecalculated(com.google.android.gms.maps.model.LatLng(rLat, rLng))
+                                }
                             )
                         }
                     }
-                    else -> {
-                        // No active leg yet — do nothing
-                    }
                 }
             }
-
 
             // Show map
         GoogleMap(
@@ -556,16 +892,23 @@ fun MapScreen(
                 }
             },
             content = {
-                // Rider marker
+                val tripStatus = incomingTrip?.child("status")?.getValue(String::class.java)
+
+                // "You" marker, explicit per role
                 userLocation?.let {
-                    Marker(
-                        state = MarkerState(position = it),
-                        title = if (role == "rider") "You are here" else "Driver location",
-                        icon = bitmapDescriptorFromVector(
-                            context,
-                            if (role == "rider") R.drawable.rider_icon else R.drawable.driver_icon
+                    if (role == "rider") {
+                        Marker(
+                            state = MarkerState(position = it),
+                            title = "You",
+                            icon = bitmapDescriptorFromVector(context, R.drawable.rider_icon)
                         )
-                    )
+                    } else if (role == "driver") {
+                        Marker(
+                            state = MarkerState(position = it),
+                            title = "You (driver)",
+                            icon = bitmapDescriptorFromVector(context, R.drawable.driver_icon)
+                        )
+                    }
                 }
 
                 // Destination marker
@@ -578,7 +921,7 @@ fun MapScreen(
                 }
 
                 // Driver markers
-                if (role == "rider") {
+                if (role == "rider" && incomingTrip == null) {
                     drivers.forEach { (id, position) ->
                         Marker(
                             state = MarkerState(position = position),
@@ -588,16 +931,19 @@ fun MapScreen(
                     }
                 }
 
-                selectedDestination?.let {
-                    Marker(
-                        state = MarkerState(position = it),
-                        title = "Selected Destination",
-                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)
-                    )
+                // Assigned driver's live position — rider only
+                if (role == "rider") {
+                    viewModel.driverPosition?.let { pos ->
+                        Marker(
+                            state = MarkerState(position = pos),
+                            title = "Your driver",
+                            icon = bitmapDescriptorFromVector(context, R.drawable.driver_icon)
+                        )
+                    }
                 }
 
-                // Route: Driver to Pickup (solid blue)
-                if (routeToPickup.isNotEmpty()) {
+                // Route: Driver to Pickup (show to both during ACCEPTED)
+                if (tripStatus == "accepted" && viewModel.routeToPickup.isNotEmpty()) {
                     Log.d("PolylineDraw", "Drawing routeToPickup with ${routeToPickup.size} points")
                     Polyline(
                         points = routeToPickup,
@@ -608,7 +954,7 @@ fun MapScreen(
                 }
 
                 // Route: Pickup to Destination (dashed green)
-                if (routeToDestination.isNotEmpty()) {
+                if (tripStatus == "in_progress" && viewModel.routeToDestination.isNotEmpty()) {
                     Log.d(
                         "PolylineDraw",
                         "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
@@ -717,56 +1063,6 @@ fun MapScreen(
 
         if (role == "driver") {
             incomingTrip?.let { trip ->
-                LaunchedEffect(trip.key) {
-                    val pickupLat = trip.child("riderLat").getValue(Double::class.java)
-                    val pickupLng = trip.child("riderLng").getValue(Double::class.java)
-                    val destLat = trip.child("destinationLat").getValue(Double::class.java)
-                    val destLng = trip.child("destinationLng").getValue(Double::class.java)
-
-                    if (pickupLat != null && pickupLng != null && destLat != null && destLng != null) {
-                        val origin = "$pickupLat,$pickupLng"
-                        val destination = "$destLat,$destLng"
-
-                        Log.d("RouteRestore", "Driver returned to Map. Refetching route: $origin → $destination")
-
-                        CoroutineScope(Dispatchers.IO).launch {
-                            try {
-                                val response = DirectionsClient.service.getRoute(
-                                    origin = origin,
-                                    destination = destination,
-                                    apiKey = Keys.MAPS_API_KEY
-                                )
-
-                                if (response.isSuccessful) {
-                                    val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
-                                    if (!polyline.isNullOrEmpty()) {
-                                        val decoded = decodePolyline(polyline)
-                                        withContext(Dispatchers.Main) {
-                                            viewModel.updateRouteToDestination(decoded)
-
-                                            if (decoded.isNotEmpty()) {
-                                                val boundsBuilder = LatLngBounds.builder()
-                                                decoded.forEach { boundsBuilder.include(it) }
-                                                val bounds = boundsBuilder.build()
-
-                                                cameraPositionState.move(
-                                                    CameraUpdateFactory.newLatLngBounds(bounds, 100)
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        Log.w("RouteRestore", "No polyline found")
-                                    }
-                                } else {
-                                    Log.e("RouteRestore", "API error: ${response.code()} ${response.message()}")
-                                }
-                            } catch (e: Exception) {
-                                Log.e("RouteRestore", "Error refetching route: ${e.message}", e)
-                            }
-                        }
-                    }
-                }
-
                 Log.d("TripUI", "Rendering IncomingTripCard for tripId=${trip.key}")
 
                 Box(
@@ -830,8 +1126,12 @@ fun MapScreen(
                     val destLat = trip.child("destinationLat").getValue(Double::class.java)
                     val destLng = trip.child("destinationLng").getValue(Double::class.java)
 
+                    /*
                     // Fetch route to Pickup destination, for the rider
                     LaunchedEffect(trip.key + role) {
+                        val status = trip.child("status").getValue(String::class.java)
+                        if (status != "accepted" || viewModel.routeToPickup.isNotEmpty()) return@LaunchedEffect
+
                         val driverLat = trip.child("driverLat").getValue(Double::class.java)
                         val driverLng = trip.child("driverLng").getValue(Double::class.java)
                         val riderLat = trip.child("riderLat").getValue(Double::class.java)
@@ -856,6 +1156,9 @@ fun MapScreen(
                                         val decoded = decodePolyline(polyline)
                                         Log.d("RouteToPickup", "Rider decoded ${decoded.size} points")
                                         viewModel.updateRouteToPickup(decoded)
+
+                                        // Save encoded once
+                                        trip.ref.child("history").child("toPickupPolyline").setValue(polyline)
                                     } else {
                                         Log.w("RouteToPickup", "No polyline found")
                                     }
@@ -867,10 +1170,14 @@ fun MapScreen(
                             }
                         }
                     }
+                    */
 
                     Log.d("RiderRouteCheck", "incomingTrip = ${trip.key}, status = $status")
 
                     LaunchedEffect(trip.key) {
+                        val s = trip.child("status").getValue(String::class.java)
+                        if (s != "in_progress") return@LaunchedEffect
+
                         if (pickupLat != null && pickupLng != null && destLat != null && destLng != null) {
                             val origin = "$pickupLat,$pickupLng"
                             val destination = "$destLat,$destLng"
@@ -890,6 +1197,9 @@ fun MapScreen(
                                         val decoded = decodePolyline(polyline)
                                         Log.d("RouteToDestination", "Rider decoded ${decoded.size} points")
                                         viewModel.updateRouteToDestination(decoded)
+
+                                        // Save encoded once
+                                        trip.ref.child("history").child("toDestinationPolyline").setValue(polyline)
 
                                         if (decoded.isNotEmpty()) {
                                             val boundsBuilder = LatLngBounds.builder()
@@ -934,19 +1244,25 @@ fun MapScreen(
     }
 
     /*
+    // add an optional onEncoded param (default null)
     suspend fun fetchRoute(
         origin: String,
         destination: String,
-        onRouteDecoded: (List<LatLng>) -> Unit
+        onRouteDecoded: (List<LatLng>) -> Unit,
+        onEncoded: ((String) -> Unit)? = null
     ) {
         try {
-            val response = DirectionsClient.service.getRoute(origin, destination, apiKey = Keys.MAPS_API_KEY)
+            val response = DirectionsClient.service.getRoute(
+                origin = origin,
+                destination = destination,
+                apiKey = Keys.MAPS_API_KEY
+            )
             if (response.isSuccessful) {
-                val polyline = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
-                if (!polyline.isNullOrEmpty()) {
-                    val decoded = decodePolyline(polyline)
-                    Log.d("RouteRefetch", "Decoded ${decoded.size} points")
+                val encoded = response.body()?.routes?.firstOrNull()?.overview_polyline?.points
+                if (!encoded.isNullOrEmpty()) {
+                    val decoded = decodePolyline(encoded)
                     onRouteDecoded(decoded)
+                    onEncoded?.invoke(encoded) // <-- hand back the encoded string for storage
                 }
             } else {
                 Log.e("RouteRefetch", "API error: ${response.code()} ${response.message()}")
@@ -955,7 +1271,7 @@ fun MapScreen(
             Log.e("RouteRefetch", "Error: ${e.message}", e)
         }
     }
-     */
+    */
 }
 
 @Composable
