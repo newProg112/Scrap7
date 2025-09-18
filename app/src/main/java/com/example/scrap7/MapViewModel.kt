@@ -33,6 +33,69 @@ class MapViewModel : ViewModel() {
     var lastRead by mutableStateOf(0L)
     private set
 
+    var driverPosition by mutableStateOf<LatLng?>(null)
+        private set
+
+    var role by mutableStateOf("rider")
+        private set
+    var tripStatus by mutableStateOf<String?>(null)
+        private set
+
+    fun updateRole(newRole: String) {
+        role = newRole
+        maybeFetchRoutes()
+    }
+
+    fun maybeFetchRoutes() {
+        val rider = pickup
+        val dest = destination
+        val driver = driverPosition
+        val st = tripStatus
+
+        if (role == "driver" && (st == "INCOMING" || st == "ACCEPTED" || st == "ON_TRIP")) {
+            if (driver != null && rider != null) {
+                viewModelScope.launch {
+                    fetchRoute(
+                        "${driver.latitude},${driver.longitude}",
+                        "${rider.latitude},${rider.longitude}",
+                        onRouteDecoded = { updateRouteToPickup(it) }
+                    )
+                }
+            }
+        }
+
+        if ((role == "rider" && (st == "ACCEPTED" || st == "ON_TRIP")) ||
+            (role == "driver" && (st == "ACCEPTED" || st == "ON_TRIP"))
+        ) {
+            if (rider != null && dest != null) {
+                viewModelScope.launch {
+                    fetchRoute(
+                        "${rider.latitude},${rider.longitude}",
+                        "${dest.latitude},${dest.longitude}",
+                        onRouteDecoded = { updateRouteToDestination(it) }
+                    )
+                }
+            }
+        }
+
+        // Optional: preview before accept
+        if (role == "rider" && (st == "REQUESTED" || st == "INCOMING")) {
+            if (rider != null && dest != null) {
+                viewModelScope.launch {
+                    fetchRoute(
+                        "${rider.latitude},${rider.longitude}",
+                        "${dest.latitude},${dest.longitude}",
+                        onRouteDecoded = { updateRouteToDestination(it) }
+                    )
+                }
+            }
+        }
+
+        if (st == "COMPLETED" || st == "CANCELLED") {
+            clearRoutes()
+        }
+    }
+
     fun setTrip(pickup: LatLng, destination: LatLng) {
         this.pickup = pickup
         this.destination = destination
@@ -42,11 +105,13 @@ class MapViewModel : ViewModel() {
     fun updatePickup(p: LatLng) {
         pickup = p
         routeToPickup = emptyList()
+        maybeFetchRoutes()
     }
 
     fun updateDestination(d: LatLng) {
         destination = d
         routeToDestination = emptyList()
+        maybeFetchRoutes()
     }
 
     fun updateRouteToPickup(route: List<LatLng>) {
@@ -62,36 +127,36 @@ class MapViewModel : ViewModel() {
         routeToDestination = emptyList()
     }
 
-    fun fetchRoute(
+    suspend fun fetchRoute(
         origin: String,
         destination: String,
-        onRouteDecoded: (List<LatLng>) -> Unit
+        onRouteDecoded: (List<LatLng>) -> Unit,
+        onEncoded: ((String) -> Unit)? = null
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val response = DirectionsClient.service.getRoute(
-                    origin = origin,
-                    destination = destination,
-                    apiKey = Keys.MAPS_API_KEY
-                )
+        try {
+            val response = DirectionsClient.service.getRoute(
+                origin = origin,
+                destination = destination,
+                apiKey = Keys.MAPS_API_KEY // or BuildConfig.MAPS_API_KEY if you switched
+            )
+            if (response.isSuccessful) {
+                val encoded = response.body()
+                    ?.routes?.firstOrNull()
+                    ?.overview_polyline?.points
 
-                if (response.isSuccessful) {
-                    val polyline = response.body()
-                        ?.routes?.firstOrNull()
-                        ?.overview_polyline?.points
-
-                    if (!polyline.isNullOrEmpty()) {
-                        val decoded = decodePolylineInternal(polyline)
-                        withContext(Dispatchers.Main) {
-                            onRouteDecoded(decoded)
-                        }
-                    }
+                if (!encoded.isNullOrEmpty()) {
+                    val decoded = decodePolylineInternal(encoded)
+                    Log.d("RouteFetch", "Decoded ${decoded.size} points")
+                    onRouteDecoded(decoded)
+                    onEncoded?.invoke(encoded) // hand back the encoded polyline for history saving
                 } else {
-                    Log.e("VMRouteFetch", "API error: ${response.code()} ${response.message()}")
+                    Log.w("RouteFetch", "No polyline in response")
                 }
-            } catch (e: Exception) {
-                Log.e("VMRouteFetch", "Error: ${e.message}", e)
+            } else {
+                Log.e("RouteFetch", "API error: ${response.code()} ${response.message()}")
             }
+        } catch (e: Exception) {
+            Log.e("RouteFetch", "Error: ${e.message}", e)
         }
     }
 
@@ -113,6 +178,58 @@ class MapViewModel : ViewModel() {
             unreadCount++
         }
     }
+
+    // --- Re-route policy state ---
+    var lastRouteOrigin: com.google.android.gms.maps.model.LatLng? = null
+        private set
+    private var lastRouteRecalcAtMs: Long = 0L
+
+    /** Should we re-fetch a route from the current origin?
+     *  Triggers only if we've moved at least [minMeters] *and* [minIntervalMs] has passed. */
+    fun shouldRecalcRoute(
+        currentOrigin: com.google.android.gms.maps.model.LatLng,
+        minMeters: Float = 150f,
+        minIntervalMs: Long = 30_000L
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val last = lastRouteOrigin ?: return true
+        if (now - lastRouteRecalcAtMs < minIntervalMs) return false
+        return distanceMeters(last, currentOrigin) >= minMeters
+    }
+
+    /** Call after a successful re-route to set a new baseline */
+    fun markRouteRecalculated(origin: com.google.android.gms.maps.model.LatLng) {
+        lastRouteOrigin = origin
+        lastRouteRecalcAtMs = System.currentTimeMillis()
+    }
+
+    private fun distanceMeters(
+        a: com.google.android.gms.maps.model.LatLng,
+        b: com.google.android.gms.maps.model.LatLng
+    ): Float {
+        val out = FloatArray(1)
+        android.location.Location.distanceBetween(
+            a.latitude, a.longitude, b.latitude, b.longitude, out
+        )
+        return out[0]
+    }
+
+    fun setDriverPosition(lat: Double, lng: Double) {
+        driverPosition = LatLng(lat, lng)
+        maybeFetchRoutes()
+    }
+
+    fun setTripStatusAndRefresh(status: String) {
+        tripStatus = status
+        maybeFetchRoutes()
+    }
+
+    fun clearDriverPosition() {
+        driverPosition = null
+    }
+
+    fun clearRouteToPickup() { routeToPickup = emptyList() }
+    fun clearRouteToDestination() { routeToDestination = emptyList() }
 }
 
 private fun decodePolylineInternal(encoded: String): List<LatLng> {

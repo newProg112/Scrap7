@@ -16,7 +16,7 @@ fun decodePolyline(encoded: String): List<LatLng> {
 
         do {
             b = encoded[index++].code - 63
-            result = result or (b and 0x1f shl shift)
+            result = result or ((b and 0x1f) shl shift)
             shift += 5
         } while (b >= 0x20)
 
@@ -28,7 +28,7 @@ fun decodePolyline(encoded: String): List<LatLng> {
 
         do {
             b = encoded[index++].code - 63
-            result = result or (b and 0x1f shl shift)
+            result = result or ((b and 0x1f) shl shift)
             shift += 5
         } while (b >= 0x20)
 
