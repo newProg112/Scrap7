@@ -8,9 +8,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.scrap7.Keys
 import com.google.android.gms.maps.model.LatLng
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 
 class MapViewModel : ViewModel() {
 
@@ -41,6 +46,21 @@ class MapViewModel : ViewModel() {
     var tripStatus by mutableStateOf<String?>(null)
         private set
 
+    // UI one-off events (toasts/snackbars)
+    sealed class UiEvent { data class Toast(val message: String): UiEvent() }
+
+    // Buffer 1 so we can emit without suspending during quick updates
+    private val _events = MutableSharedFlow<UiEvent>(extraBufferCapacity = 1)
+    val events: SharedFlow<UiEvent> = _events
+
+    private var pickupJob: Job? = null
+    private var destJob: Job? = null
+
+    private var lastPickupOrigin: LatLng? = null
+    private var lastPickupDest:   LatLng? = null
+    private var lastDestOrigin:   LatLng? = null
+    private var lastDestDest:     LatLng? = null
+
     fun updateRole(newRole: String) {
         role = newRole
         maybeFetchRoutes()
@@ -52,47 +72,31 @@ class MapViewModel : ViewModel() {
         val driver = driverPosition
         val st = tripStatus
 
+        // Driver → Rider when accepted/on_trip
         if (role == "driver" && (st == "INCOMING" || st == "ACCEPTED" || st == "ON_TRIP")) {
             if (driver != null && rider != null) {
-                viewModelScope.launch {
-                    fetchRoute(
-                        "${driver.latitude},${driver.longitude}",
-                        "${rider.latitude},${rider.longitude}",
-                        onRouteDecoded = { updateRouteToPickup(it) }
-                    )
-                }
+                fetchDriverToRiderRouteIfMoved(driver, rider)
             }
         }
 
+        // Rider (or driver) → Destination when accepted/on_trip
         if ((role == "rider" && (st == "ACCEPTED" || st == "ON_TRIP")) ||
             (role == "driver" && (st == "ACCEPTED" || st == "ON_TRIP"))
         ) {
             if (rider != null && dest != null) {
-                viewModelScope.launch {
-                    fetchRoute(
-                        "${rider.latitude},${rider.longitude}",
-                        "${dest.latitude},${dest.longitude}",
-                        onRouteDecoded = { updateRouteToDestination(it) }
-                    )
-                }
+                fetchPickupToDestinationRouteIfMoved(rider, dest)
             }
         }
 
-        // Optional: preview before accept
+        // Optional: rider preview before accept
         if (role == "rider" && (st == "REQUESTED" || st == "INCOMING")) {
             if (rider != null && dest != null) {
-                viewModelScope.launch {
-                    fetchRoute(
-                        "${rider.latitude},${rider.longitude}",
-                        "${dest.latitude},${dest.longitude}",
-                        onRouteDecoded = { updateRouteToDestination(it) }
-                    )
-                }
+                fetchPickupToDestinationRouteIfMoved(rider, dest, minMetersChange = 1f, debounceMs = 300L)
             }
         }
 
         if (st == "COMPLETED" || st == "CANCELLED") {
-            clearRoutes()
+            clearRoutesAndAnchors()
         }
     }
 
@@ -127,36 +131,79 @@ class MapViewModel : ViewModel() {
         routeToDestination = emptyList()
     }
 
+    private suspend fun <T> retryIO(
+        times: Int = 3,
+        initialDelayMs: Long = 500,
+        maxDelayMs: Long = 4000,
+        factor: Double = 2.0,
+        block: suspend () -> T
+    ): T {
+        var cur = initialDelayMs
+        repeat(times - 1) {
+            try { return block() } catch (e: Exception) {
+                if (e is java.io.IOException) {
+                    delay(cur)
+                    cur = (cur * factor).toLong().coerceAtMost(maxDelayMs)
+                } else throw e
+            }
+        }
+        return block()
+    }
+
     suspend fun fetchRoute(
         origin: String,
         destination: String,
         onRouteDecoded: (List<LatLng>) -> Unit,
-        onEncoded: ((String) -> Unit)? = null
+        onEncoded: ((String) -> Unit)? = null,
+        legName: String? = null
     ) {
         try {
-            val response = DirectionsClient.service.getRoute(
-                origin = origin,
-                destination = destination,
-                apiKey = Keys.MAPS_API_KEY // or BuildConfig.MAPS_API_KEY if you switched
-            )
-            if (response.isSuccessful) {
-                val encoded = response.body()
-                    ?.routes?.firstOrNull()
-                    ?.overview_polyline?.points
-
-                if (!encoded.isNullOrEmpty()) {
-                    val decoded = decodePolylineInternal(encoded)
-                    Log.d("RouteFetch", "Decoded ${decoded.size} points")
-                    onRouteDecoded(decoded)
-                    onEncoded?.invoke(encoded) // hand back the encoded polyline for history saving
-                } else {
-                    Log.w("RouteFetch", "No polyline in response")
+            // Retry up to 3x on network-ish failures with exponential backoff
+            val response = retryIO(times = 3) {
+                DirectionsClient.service.getRoute(
+                    origin = origin,
+                    destination = destination,
+                    apiKey = Keys.MAPS_API_KEY
+                ).also { r ->
+                    if (!r.isSuccessful) {
+                        // Non-2xx (quota / auth / bad request). Don't retry: throw to outer catch.
+                        throw IllegalStateException("HTTP ${r.code()} ${r.message()}")
+                    }
                 }
-            } else {
-                Log.e("RouteFetch", "API error: ${response.code()} ${response.message()}")
             }
+
+            val encoded = response.body()
+                ?.routes?.firstOrNull()
+                ?.overview_polyline?.points
+
+            if (encoded.isNullOrEmpty()) {
+                _events.emit(UiEvent.Toast("No route found${legName?.let { " for $it" } ?: ""}"))
+                Log.w("RouteFetch", "Empty polyline${legName?.let { " ($it)" } ?: ""}")
+                return
+            }
+
+            val decoded = decodePolylineInternal(encoded)
+            Log.d("RouteFetch", "Decoded ${decoded.size} points${legName?.let { " ($it)" } ?: ""}")
+
+            // Deliver callbacks on the main thread
+            withContext(Dispatchers.Main) {
+                onRouteDecoded(decoded)
+                onEncoded?.invoke(encoded)
+            }
+
+        } catch (e: IllegalStateException) {
+            // HTTP error (e.g., 403/429/400) – likely quota/key/problem
+            _events.emit(UiEvent.Toast("Route error${legName?.let { " ($it)" } ?: ""}: ${e.message}"))
+            Log.e("RouteFetch", "HTTP error${legName?.let { " ($it)" } ?: ""}: ${e.message}", e)
+        } catch (e: java.io.IOException) {
+            // After retries, still a network failure
+            _events.emit(UiEvent.Toast("Network issue${legName?.let { " ($it)" } ?: ""}. Retried 3×."))
+            Log.e("RouteFetch", "Network error${legName?.let { " ($it)" } ?: ""}: ${e.message}", e)
+        } catch (e: CancellationException) {
+            throw e // let coroutine cancel cleanly without error noise
         } catch (e: Exception) {
-            Log.e("RouteFetch", "Error: ${e.message}", e)
+            _events.emit(UiEvent.Toast("Unexpected error fetching route"))
+            Log.e("RouteFetch", "Unexpected${legName?.let { " ($it)" } ?: ""}: ${e.message}", e)
         }
     }
 
@@ -212,6 +259,74 @@ class MapViewModel : ViewModel() {
             a.latitude, a.longitude, b.latitude, b.longitude, out
         )
         return out[0]
+    }
+
+    private fun movedEnough(
+        prev: com.google.android.gms.maps.model.LatLng?,
+        now:  com.google.android.gms.maps.model.LatLng?,
+        thresholdM: Float
+    ): Boolean {
+        if (prev == null || now == null) return true
+        return distanceMeters(prev, now) >= thresholdM
+    }
+
+    fun clearRoutesAndAnchors() {
+        clearRoutes()
+        lastPickupOrigin = null; lastPickupDest = null
+        lastDestOrigin   = null; lastDestDest = null
+    }
+
+    fun fetchDriverToRiderRouteIfMoved(
+        origin: LatLng,
+        dest: LatLng,
+        minMetersChange: Float = 25f,
+        debounceMs: Long = 700L
+    ) {
+        val needOrigin = movedEnough(lastPickupOrigin, origin, minMetersChange)
+        val needDest   = movedEnough(lastPickupDest, dest, 1f)
+        if (!needOrigin && !needDest && routeToPickup.isNotEmpty()) return
+
+        pickupJob?.cancel()
+        pickupJob = viewModelScope.launch {
+            delay(debounceMs)
+            // Do network in IO inside fetchRoute; it already hops threads
+            fetchRoute(
+                origin = "${origin.latitude},${origin.longitude}",
+                destination = "${dest.latitude},${dest.longitude}",
+                onRouteDecoded = { decoded ->
+                    updateRouteToPickup(decoded)
+                    lastPickupOrigin = origin
+                    lastPickupDest   = dest
+                },
+                legName = "driver→pickup"
+            )
+        }
+    }
+
+    fun fetchPickupToDestinationRouteIfMoved(
+        origin: LatLng,
+        dest: LatLng,
+        minMetersChange: Float = 25f,
+        debounceMs: Long = 700L
+    ) {
+        val needOrigin = movedEnough(lastDestOrigin, origin, minMetersChange)
+        val needDest   = movedEnough(lastDestDest, dest, 1f)
+        if (!needOrigin && !needDest && routeToDestination.isNotEmpty()) return
+
+        destJob?.cancel()
+        destJob = viewModelScope.launch {
+            delay(debounceMs)
+            fetchRoute(
+                origin = "${origin.latitude},${origin.longitude}",
+                destination = "${dest.latitude},${dest.longitude}",
+                onRouteDecoded = { decoded ->
+                    updateRouteToDestination(decoded)
+                    lastDestOrigin = origin
+                    lastDestDest   = dest
+                },
+                legName = "pickup→destination"
+            )
+        }
     }
 
     fun setDriverPosition(lat: Double, lng: Double) {
