@@ -61,6 +61,9 @@ class MapViewModel : ViewModel() {
     private var lastDestOrigin:   LatLng? = null
     private var lastDestDest:     LatLng? = null
 
+    private var pickupRequestId = 0
+    private var destRequestId = 0
+
     fun updateRole(newRole: String) {
         role = newRole
         maybeFetchRoutes()
@@ -279,24 +282,27 @@ class MapViewModel : ViewModel() {
     fun fetchDriverToRiderRouteIfMoved(
         origin: LatLng,
         dest: LatLng,
-        minMetersChange: Float = 25f,
-        debounceMs: Long = 700L
+        minMetersChange: Float = 40f,
+        debounceMs: Long = 900L
     ) {
         val needOrigin = movedEnough(lastPickupOrigin, origin, minMetersChange)
         val needDest   = movedEnough(lastPickupDest, dest, 1f)
         if (!needOrigin && !needDest && routeToPickup.isNotEmpty()) return
 
         pickupJob?.cancel()
+        val myId = ++pickupRequestId
         pickupJob = viewModelScope.launch {
             delay(debounceMs)
-            // Do network in IO inside fetchRoute; it already hops threads
             fetchRoute(
                 origin = "${origin.latitude},${origin.longitude}",
                 destination = "${dest.latitude},${dest.longitude}",
                 onRouteDecoded = { decoded ->
-                    updateRouteToPickup(decoded)
-                    lastPickupOrigin = origin
-                    lastPickupDest   = dest
+                    // only apply if this is still the newest request
+                    if (myId == pickupRequestId) {
+                        updateRouteToPickup(decoded)
+                        lastPickupOrigin = origin
+                        lastPickupDest   = dest
+                    }
                 },
                 legName = "driver→pickup"
             )
@@ -306,23 +312,26 @@ class MapViewModel : ViewModel() {
     fun fetchPickupToDestinationRouteIfMoved(
         origin: LatLng,
         dest: LatLng,
-        minMetersChange: Float = 25f,
-        debounceMs: Long = 700L
+        minMetersChange: Float = 40f,
+        debounceMs: Long = 900L
     ) {
         val needOrigin = movedEnough(lastDestOrigin, origin, minMetersChange)
         val needDest   = movedEnough(lastDestDest, dest, 1f)
         if (!needOrigin && !needDest && routeToDestination.isNotEmpty()) return
 
         destJob?.cancel()
+        val myId = ++destRequestId
         destJob = viewModelScope.launch {
             delay(debounceMs)
             fetchRoute(
                 origin = "${origin.latitude},${origin.longitude}",
                 destination = "${dest.latitude},${dest.longitude}",
                 onRouteDecoded = { decoded ->
-                    updateRouteToDestination(decoded)
-                    lastDestOrigin = origin
-                    lastDestDest   = dest
+                    if (myId == destRequestId) {
+                        updateRouteToDestination(decoded)
+                        lastDestOrigin = origin
+                        lastDestDest   = dest
+                    }
                 },
                 legName = "pickup→destination"
             )
