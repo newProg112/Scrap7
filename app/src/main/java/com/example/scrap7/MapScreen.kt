@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,6 +34,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -51,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.example.scrap7.ui.MessagingPanel
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -81,7 +84,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.logging.Handler
 
 /*
 val latLngListSaver = run {
@@ -149,6 +151,10 @@ fun MapScreen(
     // Fit-once flags
     var pickupFitted by remember { mutableStateOf(false) }
     var destFitted by remember { mutableStateOf(false) }
+
+    var showChat by remember { mutableStateOf(false) }
+    val tripId = incomingTrip?.key
+    val myUserId = userId  // or FirebaseAuth.getInstance().currentUser?.uid
 
 // Reset flags when trip status changes
     LaunchedEffect(incomingTrip?.child("status")?.getValue(String::class.java)) {
@@ -776,7 +782,7 @@ fun MapScreen(
             }
 
             // Show map
-        GoogleMap(
+            GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
             onMapLoaded = { Log.d("MapHealth", "Map tiles loaded")},
@@ -868,11 +874,34 @@ fun MapScreen(
             }
         )
 
-            if (incomingTrip?.key != null) {
+            if (showChat && tripId != null && myUserId != null) {
+                Surface(
+                    tonalElevation = 6.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .heightIn(min = 220.dp, max = 360.dp)
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    MessagingPanel(tripId = tripId, myUserId = myUserId)
+                }
+            }
+
+            FloatingActionButton(
+                onClick = {
+                    val opening = !showChat
+                    showChat = opening
+                    if (opening) viewModel.clearUnread() // clear when opening overlay
+                },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+            ) { Text(if (showChat) "×" else "💬") }
+
+            // Show the badge FAB only when a trip exists, the overlay is closed, and userId is not null
+            if (incomingTrip?.key != null && !showChat && userId != null) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(16.dp)
+                        .padding(end = 16.dp, bottom = 88.dp) // sits above the toggle FAB
                 ) {
                     BadgedBox(
                         badge = {
@@ -882,16 +911,15 @@ fun MapScreen(
                     ) {
                         FloatingActionButton(
                             onClick = {
-                                viewModel.clearUnread() // reset badge before navigating
-                                navController.navigate("chat/${incomingTrip?.key ?: ""}/$userId")
+                                viewModel.clearUnread()
+                                val tripKey = incomingTrip!!.key!!
+                                val uid = userId!!
+                                navController.navigate("chat/$tripKey/$uid")
                             }
-                        ) {
-                            Text("Chat")
-                        }
+                        ) { Text("Chat") }
                     }
                 }
             }
-
         }
 
         // Request Pickup Button (only for riders)
