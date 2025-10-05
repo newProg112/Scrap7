@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.example.scrap7.data.chat.Message
 import com.example.scrap7.ui.MessagingPanel
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -76,6 +77,7 @@ import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
@@ -726,12 +728,13 @@ fun MapScreen(
                     // Set a baseline so existing history doesn't count as unread
                     viewModel.markUnreadBaselineNowIfUnset()
 
-                    val ref = FirebaseDatabase.getInstance().getReference("messages").child(tripId)
+                    val ref = FirebaseDatabase.getInstance()
+                        .getReference("messages").child(tripId)
                     val listener = object : ChildEventListener {
                         override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                            // Expecting your Message data class with senderId:String? and timeStamp:Long?
-                            val msg = snapshot.getValue(Message::class.java)
-                            viewModel.bumpUnreadIfNeeded(msg?.senderId, msg?.timeStamp, userId)
+                            val from = snapshot.child("senderId").getValue(String::class.java)
+                            val ts   = snapshot.child("timeStamp").getValue(Long::class.java)
+                            viewModel.bumpUnreadIfNeeded(from, ts, userId)
                         }
                         override fun onCancelled(error: DatabaseError) {}
                         override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
@@ -787,6 +790,10 @@ fun MapScreen(
             cameraPositionState = cameraPositionState,
             onMapLoaded = { Log.d("MapHealth", "Map tiles loaded")},
             properties = MapProperties(isMyLocationEnabled = userLocation != null),
+                uiSettings = MapUiSettings(
+                    zoomControlsEnabled = false,     // disable built-in zoom
+                    myLocationButtonEnabled = false  // (optional) we already recenter ourselves
+                ),
             onMapClick = { latLng ->
                 shouldFollowUser = false // disable following when user taps map
 
@@ -874,6 +881,50 @@ fun MapScreen(
             }
         )
 
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                // Zoom in
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { cameraPositionState.move(CameraUpdateFactory.zoomIn()) }
+                ) { Text("+") }
+
+                // Zoom out
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { cameraPositionState.move(CameraUpdateFactory.zoomOut()) }
+                ) { Text("–") }
+
+                // Center on me (now for BOTH rider & driver)
+                androidx.compose.material3.FloatingActionButton(
+                    onClick = {
+                        shouldFollowUser = true
+                        userLocation?.let {
+                            cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(it, 16f))
+                        }
+                    }
+                ) { Icon(Icons.Default.Place, contentDescription = "Re-center") }
+
+                // Chat (badged)
+                BadgedBox(
+                    badge = {
+                        val count = viewModel.unreadCount
+                        if (!showChat && count > 0) Badge { Text(if (count > 9) "9+" else "$count") }
+                    }
+                ) {
+                    androidx.compose.material3.FloatingActionButton(
+                        onClick = {
+                            val opening = !showChat
+                            showChat = opening
+                            if (opening) viewModel.clearUnread()
+                        }
+                    ) { Text("Chat") }
+                }
+            }
+
             if (showChat && tripId != null && myUserId != null) {
                 Surface(
                     tonalElevation = 6.dp,
@@ -883,41 +934,11 @@ fun MapScreen(
                         .heightIn(min = 220.dp, max = 360.dp)
                         .padding(horizontal = 8.dp, vertical = 8.dp)
                 ) {
-                    MessagingPanel(tripId = tripId, myUserId = myUserId)
-                }
-            }
-
-            FloatingActionButton(
-                onClick = {
-                    val opening = !showChat
-                    showChat = opening
-                    if (opening) viewModel.clearUnread() // clear when opening overlay
-                },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
-            ) { Text(if (showChat) "×" else "💬") }
-
-            // Show the badge FAB only when a trip exists, the overlay is closed, and userId is not null
-            if (incomingTrip?.key != null && !showChat && userId != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 88.dp) // sits above the toggle FAB
-                ) {
-                    BadgedBox(
-                        badge = {
-                            val count = viewModel.unreadCount
-                            if (count > 0) Badge { Text(if (count > 9) "9+" else "$count") }
-                        }
-                    ) {
-                        FloatingActionButton(
-                            onClick = {
-                                viewModel.clearUnread()
-                                val tripKey = incomingTrip!!.key!!
-                                val uid = userId!!
-                                navController.navigate("chat/$tripKey/$uid")
-                            }
-                        ) { Text("Chat") }
-                    }
+                    MessagingPanel(
+                        tripId = tripId,
+                        myUserId = myUserId,
+                        onClose = { showChat = false }
+                        )
                 }
             }
         }
@@ -964,27 +985,6 @@ fun MapScreen(
                     .padding(16.dp)
             ) {
                 Text("Request Pickup")
-            }
-
-            // Re-center button
-            Button(
-                onClick = {
-                    shouldFollowUser = true
-                    userLocation?.let {
-                        cameraPositionState.move(
-                            CameraUpdateFactory.newLatLngZoom(it, 16f)
-                        )
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd) // bottom right of the screen
-                    .padding(16.dp)
-            ) {
-                // Text("Re-center") // use icon instead for better UI
-                Icon(
-                    imageVector = Icons.Default.Place,
-                    contentDescription = "Re-center"
-                )
             }
         }
 
@@ -1037,7 +1037,11 @@ fun MapScreen(
                         disableCameraFollow = { shouldFollowUser = false },
                         navController = navController,
                         userId = userId,
-                        viewModel = viewModel
+                        viewModel = viewModel,
+                        onOpenChat = {
+                            showChat = true
+                            viewModel.clearUnread()
+                        }
                     )
                 }
 
@@ -1284,7 +1288,8 @@ fun IncomingTripCard(
     onRouteToDestinationDecoded: (List<LatLng>) -> Unit,
     navController: NavController,
     userId: String,
-    viewModel: MapViewModel
+    viewModel: MapViewModel,
+    onOpenChat: () -> Unit
 ) {
     Log.d("TripUI", "Trip popup triggered for rider: ${trip.child("riderId").value}")
     val riderId = trip.child("riderId").getValue(String::class.java) ?: "Unknown"
@@ -1356,25 +1361,6 @@ fun IncomingTripCard(
                     ) {
                         Text("Start Trip")
                     }
-
-
-                    // Message Button
-                    Button(
-                        onClick = {
-                            val tripId = trip.key
-                            if (tripId != null) {
-                                navController.navigate("chat/$tripId/$userId")
-                            } else {
-                                Log.e("ChatNav", "Trip ID is null, cannot navigate to chat")
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp)
-                    ) {
-                        Text("Message")
-                    }
-
                 }
 
                 // Optionally show route or completion
@@ -1428,63 +1414,9 @@ fun IncomingTripCard(
                 ) {
                     Text("Complete Trip")
                 }
-
-
-                    // Message Button
-                    Button(
-                        onClick = {
-                            val tripId = trip.key
-                            if (tripId != null) {
-                                navController.navigate("chat/$tripId/$userId")
-                            } else {
-                                Log.e("ChatNav", "Trip ID is null, cannot navigate to chat")
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Gray),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp)
-                    ) {
-                        Text("Message")
-                    }
             }
             }
             }
         }
     }
 }
-
-/*
-// --- Route helper used by MapScreen.kt call sites ---
-private fun fetchRoute(
-    origin: String,
-    destination: String,
-    onRouteDecoded: (List<LatLng>) -> Unit
-) {
-    CoroutineScope(Dispatchers.IO).launch {
-        try {
-            val response = DirectionsClient.service.getRoute(
-                origin = origin,
-                destination = destination,
-                apiKey = Keys.MAPS_API_KEY
-            )
-            if (response.isSuccessful) {
-                val polyline = response.body()
-                    ?.routes?.firstOrNull()
-                    ?.overview_polyline?.points
-
-                if (!polyline.isNullOrEmpty()) {
-                    val decoded = decodePolyline(polyline)
-                    withContext(Dispatchers.Main) {
-                        onRouteDecoded(decoded) // safe to touch ViewModel here
-                    }
-                }
-            } else {
-                Log.e("RouteFetch", "API error: ${response.code()} ${response.message()}")
-            }
-        } catch (e: Exception) {
-            Log.e("RouteFetch", "Error: ${e.message}", e)
-        }
-    }
-}
- */

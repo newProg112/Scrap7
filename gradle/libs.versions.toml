@@ -14,6 +14,7 @@ maps = "18.2.0"
 mapsCompose = "2.11.4"
 play-services-location = "21.0.1"
 firebase-database = "20.3.0"
+generativeai = "0.9.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -35,6 +36,7 @@ androidx-compiler = { group = "androidx.databinding", name = "compiler", version
 google-maps = { group = "com.google.android.gms", name = "play-services-maps", version.ref = "maps" }
 google-maps-compose = { group = "com.google.maps.android", name = "maps-compose", version.ref = "mapsCompose" }
 google_playservices_location = {group = "com.google.android.gms", name = "play-services-location", version.ref = "play-services-location"}
+generativeai = { group = "com.google.ai.client.generativeai", name = "generativeai", version.ref = "generativeai" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

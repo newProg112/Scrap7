@@ -14,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -34,13 +35,26 @@ fun MessagingPanel(
     tripId: String,
     myUserId: String,
     modifier: Modifier = Modifier,
-    vm: MessagingViewModel = viewModel()
+    vm: MessagingViewModel = viewModel(),
+    onClose: () -> Unit
 ) {
     LaunchedEffect(tripId, myUserId) { vm.bind(tripId, myUserId) }
 
     val messages by vm.messages.collectAsState()
 
     Column(modifier) {
+        // Header with a Close action
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+        ) {
+            Text("Chat", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = onClose) { Text("Close") }
+        }
+        Divider()
+
         MessagesList(
             messages = messages,
             myUserId = myUserId,
@@ -48,7 +62,9 @@ fun MessagingPanel(
                 .weight(1f)
                 .fillMaxWidth()
         )
+
         Divider()
+
         MessageComposer(
             onSend = { text -> vm.send(text) },
             modifier = Modifier.fillMaxWidth()
