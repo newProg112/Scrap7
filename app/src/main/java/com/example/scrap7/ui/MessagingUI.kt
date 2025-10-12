@@ -34,7 +34,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.scrap7.Message
 import com.example.scrap7.MessagingViewModel
 import com.example.scrap7.model.ChatMessage
 import kotlinx.coroutines.launch
@@ -77,7 +76,7 @@ fun MessagingPanel(
             withFrameNanos { }
             withFrameNanos { } // extra frame for good measure
             val last = messages.lastIndex.coerceAtLeast(0)
-            if (last >= 0) listState.scrollToItem(last)
+            if (last >= 0) listState.animateScrollToItem(last)
         }
     }
 
@@ -86,17 +85,6 @@ fun MessagingPanel(
         if (messages.isNotEmpty() && atBottom) {
             withFrameNanos { /* wait for layout */ }
             listState.animateScrollToItem(messages.lastIndex)
-        }
-    }
-
-    // When messages change (including first load), jump to the last item
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            val info = listState.layoutInfo
-            val atBottom = info.visibleItemsInfo.lastOrNull()?.index == info.totalItemsCount - 1
-            if (atBottom) {
-                listState.animateScrollToItem(messages.lastIndex)
-            }
         }
     }
 
