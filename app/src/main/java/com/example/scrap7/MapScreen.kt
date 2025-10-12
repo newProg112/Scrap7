@@ -53,7 +53,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
-import com.example.scrap7.data.chat.Message
 import com.example.scrap7.ui.MessagingPanel
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -157,6 +156,12 @@ fun MapScreen(
     var showChat by remember { mutableStateOf(false) }
     val tripId = incomingTrip?.key
     val myUserId = userId  // or FirebaseAuth.getInstance().currentUser?.uid
+
+    LaunchedEffect(showChat, tripId) {
+        if (showChat && tripId != null) {
+            viewModel.clearUnread()
+        }
+    }
 
 // Reset flags when trip status changes
     LaunchedEffect(incomingTrip?.child("status")?.getValue(String::class.java)) {
@@ -725,22 +730,23 @@ fun MapScreen(
                 if (tripId == null) {
                     onDispose { }
                 } else {
-                    // Set a baseline so existing history doesn't count as unread
                     viewModel.markUnreadBaselineNowIfUnset()
 
                     val ref = FirebaseDatabase.getInstance()
-                        .getReference("messages").child(tripId)
+                        .getReference("trips").child(tripId).child("messages")
+
                     val listener = object : ChildEventListener {
                         override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                             val from = snapshot.child("senderId").getValue(String::class.java)
-                            val ts   = snapshot.child("timeStamp").getValue(Long::class.java)
+                            val ts   = snapshot.child("timestamp").getValue(Long::class.java)
                             viewModel.bumpUnreadIfNeeded(from, ts, userId)
                         }
-                        override fun onCancelled(error: DatabaseError) {}
                         override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
                         override fun onChildRemoved(snapshot: DataSnapshot) {}
                         override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+                        override fun onCancelled(error: DatabaseError) {}
                     }
+
                     ref.addChildEventListener(listener)
                     onDispose { ref.removeEventListener(listener) }
                 }
@@ -919,7 +925,6 @@ fun MapScreen(
                         onClick = {
                             val opening = !showChat
                             showChat = opening
-                            if (opening) viewModel.clearUnread()
                         }
                     ) { Text("Chat") }
                 }
@@ -934,9 +939,13 @@ fun MapScreen(
                         .heightIn(min = 220.dp, max = 360.dp)
                         .padding(horizontal = 8.dp, vertical = 8.dp)
                 ) {
+                    val tripStatus = incomingTrip?.child("status")?.getValue(String::class.java)
+
                     MessagingPanel(
                         tripId = tripId,
                         myUserId = myUserId,
+                        visible = true,
+                        tripStatus = tripStatus ?: "",
                         onClose = { showChat = false }
                         )
                 }
@@ -1040,7 +1049,6 @@ fun MapScreen(
                         viewModel = viewModel,
                         onOpenChat = {
                             showChat = true
-                            viewModel.clearUnread()
                         }
                     )
                 }
