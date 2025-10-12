@@ -36,7 +36,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.scrap7.MessagingViewModel
 import com.example.scrap7.model.ChatMessage
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.launch
+
+private fun tsToTime(ts: Long): String =
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
 
 @Composable
 fun MessagingPanel(
@@ -164,21 +170,52 @@ private fun MessagesList(
                     if (mine) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surfaceVariant
 
+                // Shapes (slightly different corners)
+                val bubbleShape = if (mine) {
+                    // mine → right aligned: square top-right
+                    MaterialTheme.shapes.large.copy(
+                        topEnd = MaterialTheme.shapes.small.topEnd, // a bit sharper
+                        topStart = MaterialTheme.shapes.large.topStart,
+                        bottomEnd = MaterialTheme.shapes.small.bottomEnd,
+                        bottomStart = MaterialTheme.shapes.large.bottomStart
+                    )
+                } else {
+                    // theirs → left aligned: square top-left
+                    MaterialTheme.shapes.large.copy(
+                        topStart = MaterialTheme.shapes.small.topStart,
+                        topEnd = MaterialTheme.shapes.large.topEnd,
+                        bottomStart = MaterialTheme.shapes.small.bottomStart,
+                        bottomEnd = MaterialTheme.shapes.large.bottomEnd
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
                 ) {
                     Surface(
                         color = bubbleColor,
-                        shape = MaterialTheme.shapes.large,
+                        shape = bubbleShape,
                         tonalElevation = 1.dp,
-                        modifier = Modifier.padding(vertical = 4.dp).widthIn(max = 320.dp)
+                        modifier = Modifier
+                            .padding(vertical = 4.dp)
+                            .widthIn(max = 320.dp)
                     ) {
-                        Text(
-                            text = m.text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(10.dp)
-                        )
+                        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                            // Message text
+                            Text(
+                                text = m.text,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            // Compact timestamp
+                            if (m.timestamp > 0L) {
+                                Text(
+                                    text = tsToTime(m.timestamp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
