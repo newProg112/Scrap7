@@ -31,6 +31,13 @@ class MessagingViewModel(
     private var _tripId: String? = null
     private var _myUserId: String? = null
 
+    // top-level fields
+    private var typingRef: DatabaseReference? = null
+    private var otherTypingRef: DatabaseReference? = null
+
+    private val _otherTyping = MutableStateFlow(false)
+    val otherTyping: StateFlow<Boolean> = _otherTyping
+
     /**
      * Begin listening to /trips/{tripId}/messages. Call again if tripId/user changes.
      */
@@ -80,6 +87,11 @@ class MessagingViewModel(
 
         // Load the latest chunk and stream new ones
         ref.limitToLast(200).addChildEventListener(childListener as ChildEventListener)
+
+        // my typing node
+        typingRef = db.reference.child("trips").child(tripId)
+            .child("typing").child(myUserId)
+        typingRef?.onDisconnect()?.removeValue()
     }
 
     /**
@@ -92,6 +104,9 @@ class MessagingViewModel(
         _messages.value = emptyList()
         _tripId = null
         _myUserId = null
+        typingRef?.removeValue()
+        typingRef = null
+        _otherTyping.value = false
     }
 
     /**
@@ -112,9 +127,29 @@ class MessagingViewModel(
         ref.updateChildren(payload)
     }
 
+    fun observeOtherTyping(tripId: String, otherUserId: String) {
+        otherTypingRef?.removeEventListener(otherTypingListener)
+        otherTypingRef = db.reference.child("trips").child(tripId)
+            .child("typing").child(otherUserId)
+        otherTypingRef?.addValueEventListener(otherTypingListener)
+    }
+
+    private val otherTypingListener = object : ValueEventListener {
+        override fun onDataChange(s: DataSnapshot) {
+            _otherTyping.value = s.getValue(Boolean::class.java) == true
+        }
+        override fun onCancelled(error: DatabaseError) {}
+    }
+
+    fun setTypingActive(isTyping: Boolean) {
+        typingRef?.setValue(isTyping)
+    }
+
     override fun onCleared() {
         super.onCleared()
         unbind()
+        otherTypingRef?.removeEventListener(otherTypingListener)
+        otherTypingRef = null
     }
 }
 

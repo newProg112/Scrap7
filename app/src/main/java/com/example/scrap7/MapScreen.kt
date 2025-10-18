@@ -155,7 +155,24 @@ fun MapScreen(
 
     var showChat by remember { mutableStateOf(false) }
     val tripId = incomingTrip?.key
-    val myUserId = userId  // or FirebaseAuth.getInstance().currentUser?.uid
+    val myUserId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        ?: run {
+            Log.e("AUTH", "No Firebase user (not signed in)"); return
+        }
+
+    val driverId = incomingTrip?.child("driverId")?.getValue(String::class.java)
+    val riderId  = incomingTrip?.child("riderId")?.getValue(String::class.java)
+    val otherUserId = when (myUserId) {
+        driverId -> riderId
+        riderId  -> driverId
+        else     -> null
+    }
+    val tripStatus: String = incomingTrip?.child("status")?.getValue(String::class.java) ?: ""
+
+    LaunchedEffect(Unit) {
+        val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        android.util.Log.d("AUTH", "role=$role  auth.uid=$uid")
+    }
 
     LaunchedEffect(showChat, tripId) {
         if (showChat && tripId != null) {
@@ -198,11 +215,65 @@ fun MapScreen(
         }
     }
 
+    LaunchedEffect(tripStatus, incomingTrip?.key, role) {
+        val trip = incomingTrip ?: return@LaunchedEffect
+
+        // Read coords safely
+        fun d(name: String) = trip.child(name).getValue(Double::class.java)
+        val riderLat = d("riderLat"); val riderLng = d("riderLng")
+        val destLat  = d("destinationLat"); val destLng  = d("destinationLng")
+        val driverLat = d("driverLat"); val driverLng = d("driverLng")
+
+        Log.d("Routes",
+            "status=$tripStatus role=$role " +
+                    "driver=(${driverLat},${driverLng}) rider=(${riderLat},${riderLng}) dest=(${destLat},${destLng})"
+        )
+
+        when (tripStatus) {
+            "accepted" -> {
+                // Driver should see driver→rider
+                if (role == "driver" && driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                    viewModel.clearRouteToDestination()
+                    viewModel.fetchDriverToRiderRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(driverLat, driverLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(riderLat,  riderLng)
+                    )
+                }
+                // Rider should see driver→rider too (optional)
+                if (role == "rider" && driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                    viewModel.clearRouteToDestination()
+                    viewModel.fetchDriverToRiderRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(driverLat, driverLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(riderLat,  riderLng)
+                    )
+                }
+            }
+
+            "in_progress" -> {
+                // Both see rider→destination (and drop the pickup leg)
+                viewModel.clearRouteToPickup()
+                if (riderLat != null && riderLng != null && destLat != null && destLng != null) {
+                    viewModel.fetchPickupToDestinationRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(riderLat, riderLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(destLat,  destLng)
+                    )
+                }
+            }
+
+            else -> {
+                // requested / completed / cancelled
+                viewModel.clearRouteToPickup()
+                viewModel.clearRouteToDestination()
+            }
+        }
+    }
+
+
     if (role == "driver") {
-        LaunchedEffect(userId) {
+        LaunchedEffect(myUserId) {
             FirebaseDatabase.getInstance().getReference("trips")
                 .orderByChild("driverId")
-                .equalTo(userId) // current driver's userId
+                .equalTo(myUserId) // current driver's userId
                 .addChildEventListener(object : ChildEventListener {
                     override fun onChildAdded(
                         snapshot: DataSnapshot,
@@ -254,12 +325,40 @@ fun MapScreen(
                 })
         }
 
+        LaunchedEffect(myUserId) {
+            val ref = com.google.firebase.database.FirebaseDatabase.getInstance().getReference("trips")
+
+            // 3a) Does my filtered query return anything?
+            ref.orderByChild("driverId").equalTo(myUserId).get()
+                .addOnSuccessListener { snap ->
+                    android.util.Log.d("TripsProbe", "equalTo(myUserId) count=${snap.childrenCount}")
+                    for (c in snap.children) {
+                        android.util.Log.d(
+                            "TripsProbe",
+                            "tripId=${c.key} status=${c.child("status").value}"
+                        )
+                    }
+                }
+                .addOnFailureListener { e ->
+                    android.util.Log.e("TripsProbe", "Permission denied or error: ${e.message}", e)
+                }
+
+            // 3b) Optional: root peek (may be denied by rules; that's fine)
+            ref.limitToFirst(1).get()
+                .addOnSuccessListener { snap ->
+                    android.util.Log.d("TripsProbe", "/trips exists? hasChildren=${snap.hasChildren()}")
+                }
+                .addOnFailureListener { e ->
+                    android.util.Log.e("TripsProbe", "Root read blocked (expected): ${e.message}")
+                }
+        }
+
         // check for trips in Firebase that are "accepted" or "in-progress" and restore it when moving back from message screen
-        LaunchedEffect(userId, role) {
+        LaunchedEffect(myUserId, role) {
             if (role == "driver") {
                 val tripRef = FirebaseDatabase.getInstance().getReference("trips")
                 tripRef.orderByChild("driverId")
-                    .equalTo(userId)
+                    .equalTo(myUserId)
                     .get()
                     .addOnSuccessListener { snapshot ->
                         for (tripSnapshot in snapshot.children) {
@@ -331,7 +430,7 @@ fun MapScreen(
 
                     FirebaseDatabase.getInstance()
                         .getReference("driversOnline")
-                        .child(userId)
+                        .child(myUserId)
                         .setValue(locationData)
                         .addOnSuccessListener {
                             Log.d("MapScreen", "Driver location uploaded successfully")
@@ -367,7 +466,7 @@ fun MapScreen(
 
                 FirebaseDatabase.getInstance().getReference("trips")
                     .orderByChild("riderId")
-                    .equalTo(userId)
+                    .equalTo(myUserId)
                     .addChildEventListener(object : ChildEventListener {
                         override fun onChildAdded(
                             snapshot: DataSnapshot,
@@ -567,7 +666,7 @@ fun MapScreen(
                     val fused = LocationServices.getFusedLocationProviderClient(context)
 
                     val tripsRef   = FirebaseDatabase.getInstance().getReference("trips").child(tripId)
-                    val onlineRef  = FirebaseDatabase.getInstance().getReference("driversOnline").child(userId)
+                    val onlineRef  = FirebaseDatabase.getInstance().getReference("driversOnline").child(myUserId)
 
                     // ~2s desired interval; min 1s between updates
                     val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
@@ -725,7 +824,7 @@ fun MapScreen(
             }
 
             // Bump unread when new messages arrive from the *other* user
-            DisposableEffect(incomingTrip?.key, userId) {
+            DisposableEffect(incomingTrip?.key, myUserId) {
                 val tripId = incomingTrip?.key
                 if (tripId == null) {
                     onDispose { }
@@ -739,12 +838,15 @@ fun MapScreen(
                         override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                             val from = snapshot.child("senderId").getValue(String::class.java)
                             val ts   = snapshot.child("timestamp").getValue(Long::class.java)
-                            viewModel.bumpUnreadIfNeeded(from, ts, userId)
+                            viewModel.bumpUnreadIfNeeded(from, ts, myUserId)
                         }
                         override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
                         override fun onChildRemoved(snapshot: DataSnapshot) {}
                         override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                        override fun onCancelled(error: DatabaseError) {}
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.e("UnreadListen", "messages listener cancelled: ${error.message} @ trips/$tripId/messages")
+
+                        }
                     }
 
                     ref.addChildEventListener(listener)
@@ -810,8 +912,6 @@ fun MapScreen(
                 }
             },
             content = {
-                val tripStatus = incomingTrip?.child("status")?.getValue(String::class.java)
-
                 // "You" marker, explicit per role
                 userLocation?.let {
                     if (role == "rider") {
@@ -862,27 +962,34 @@ fun MapScreen(
 
                 // Route: Driver to Pickup (show to both during ACCEPTED)
                 if (tripStatus == "accepted" && viewModel.routeToPickup.isNotEmpty()) {
-                    Log.d("PolylineDraw", "Drawing routeToPickup with ${routeToPickup.size} points")
-                    Polyline(
-                        points = routeToPickup,
-                        color = Color.Red, // color = Color.Blue,
-                        width = 12f, // width = 8f
-                        pattern = null
-                    )
+                    androidx.compose.runtime.key("pickup-$tripStatus") {
+                        Log.d(
+                            "PolylineDraw",
+                            "Drawing routeToPickup with ${routeToPickup.size} points"
+                        )
+                        Polyline(
+                            points = routeToPickup,
+                            color = Color.Red, // color = Color.Blue,
+                            width = 12f, // width = 8f
+                            pattern = null
+                        )
+                    }
                 }
 
                 // Route: Pickup to Destination (dashed green)
                 if (tripStatus == "in_progress" && viewModel.routeToDestination.isNotEmpty()) {
-                    Log.d(
-                        "PolylineDraw",
-                        "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
-                    )
-                    Polyline(
-                        points = routeToDestination,
-                        color = Color.Magenta, // Color.Green,
-                        width = 20f, // 8f,
-                        pattern = null // listOf(Dot(), Gap(10f)) // Dashed line
-                    )
+                    androidx.compose.runtime.key("dest-$tripStatus") {
+                        Log.d(
+                            "PolylineDraw",
+                            "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
+                        )
+                        Polyline(
+                            points = routeToDestination,
+                            color = Color.Magenta, // Color.Green,
+                            width = 20f, // 8f,
+                            pattern = null // listOf(Dot(), Gap(10f)) // Dashed line
+                        )
+                    }
                 }
             }
         )
@@ -930,7 +1037,7 @@ fun MapScreen(
                 }
             }
 
-            if (showChat && tripId != null && myUserId != null) {
+            if (showChat && tripId != null && otherUserId != null) {
                 Surface(
                     tonalElevation = 6.dp,
                     modifier = Modifier
@@ -939,13 +1046,12 @@ fun MapScreen(
                         .heightIn(min = 220.dp, max = 360.dp)
                         .padding(horizontal = 8.dp, vertical = 8.dp)
                 ) {
-                    val tripStatus = incomingTrip?.child("status")?.getValue(String::class.java)
-
                     MessagingPanel(
                         tripId = tripId,
                         myUserId = myUserId,
+                        otherUserId = otherUserId,
                         visible = true,
-                        tripStatus = tripStatus ?: "",
+                        tripStatus = tripStatus,
                         onClose = { showChat = false }
                         )
                 }
@@ -987,7 +1093,7 @@ fun MapScreen(
             Button(
                 onClick = {
                     Log.d("MapScreen", "Request Pickup button pressed. Selected destination: $selectedDestination")
-                    requestPickup(userId, userLocation, selectedDestination, drivers)
+                    requestPickup(myUserId, userLocation, selectedDestination, drivers)
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1045,7 +1151,7 @@ fun MapScreen(
                         },
                         disableCameraFollow = { shouldFollowUser = false },
                         navController = navController,
-                        userId = userId,
+                        userId = myUserId,
                         viewModel = viewModel,
                         onOpenChat = {
                             showChat = true
@@ -1265,10 +1371,13 @@ fun requestPickup(
         .child(tripId)
         .setValue(tripData)
         .addOnSuccessListener {
-            Log.d("RequestPickup", "Trip created successfully")
+            android.util.Log.d(
+                "TripsCreate",
+                "OK trip=$tripId riderId=${tripData["riderId"]} driverId=${tripData["driverId"]}"
+            )
         }
-        .addOnFailureListener {
-            Log.e("RequestPickup", "Failed to create trip", it)
+        .addOnFailureListener { e ->
+            android.util.Log.e("TripsCreate", "FAIL: ${e.message}", e)
         }
 }
 

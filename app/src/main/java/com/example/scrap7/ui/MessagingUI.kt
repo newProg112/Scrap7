@@ -40,6 +40,24 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
+import java.util.Calendar
+
+private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+private val prettyDayFmt = SimpleDateFormat("EEE, d MMM", Locale.getDefault())
+
+private fun dayKey(ts: Long): String = dayFmt.format(Date(ts))
+private fun dayLabel(ts: Long): String {
+    val cal = Calendar.getInstance()
+    val today = dayFmt.format(cal.time)
+    cal.add(Calendar.DATE, -1)
+    val yesterday = dayFmt.format(cal.time)
+    val k = dayKey(ts)
+    return when (k) {
+        today -> "Today"
+        yesterday -> "Yesterday"
+        else -> prettyDayFmt.format(Date(ts))
+    }
+}
 
 private fun tsToTime(ts: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ts))
@@ -48,6 +66,7 @@ private fun tsToTime(ts: Long): String =
 fun MessagingPanel(
     tripId: String,
     myUserId: String,
+    otherUserId: String,
     visible: Boolean,
     tripStatus: String,
     modifier: Modifier = Modifier,
@@ -57,6 +76,11 @@ fun MessagingPanel(
     // Start listening whenever tripId/user changes
     LaunchedEffect(tripId, myUserId) { vm.bind(tripId, myUserId) }
     DisposableEffect(tripId, myUserId) { onDispose { vm.unbind() } }
+
+    // Observe other user's typing
+    LaunchedEffect(tripId, otherUserId) { vm.observeOtherTyping(tripId, otherUserId) }
+
+    val otherTyping by vm.otherTyping.collectAsState()
 
     val messages by vm.messages.collectAsState()
     val listState = rememberLazyListState()
@@ -134,8 +158,17 @@ fun MessagingPanel(
 
         Divider()
 
+        if (otherTyping) {
+            Text(
+                "Typing…",
+                modifier = Modifier.padding(horizontal = 12.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         MessageComposer(
             onSend = { text -> vm.send(text) },
+            onTyping = { isTyping -> vm.setTypingActive(isTyping) },
             modifier = Modifier.fillMaxWidth(),
             listState = listState
         )
@@ -164,59 +197,83 @@ private fun MessagesList(
                 )
             }
         } else {
-            items(messages, key = { it.id }) { m ->
-                val mine = m.senderId == myUserId
-                val bubbleColor =
-                    if (mine) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant
-
-                // Shapes (slightly different corners)
-                val bubbleShape = if (mine) {
-                    // mine → right aligned: square top-right
-                    MaterialTheme.shapes.large.copy(
-                        topEnd = MaterialTheme.shapes.small.topEnd, // a bit sharper
-                        topStart = MaterialTheme.shapes.large.topStart,
-                        bottomEnd = MaterialTheme.shapes.small.bottomEnd,
-                        bottomStart = MaterialTheme.shapes.large.bottomStart
-                    )
-                } else {
-                    // theirs → left aligned: square top-left
-                    MaterialTheme.shapes.large.copy(
-                        topStart = MaterialTheme.shapes.small.topStart,
-                        topEnd = MaterialTheme.shapes.large.topEnd,
-                        bottomStart = MaterialTheme.shapes.small.bottomStart,
-                        bottomEnd = MaterialTheme.shapes.large.bottomEnd
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
-                ) {
-                    Surface(
-                        color = bubbleColor,
-                        shape = bubbleShape,
-                        tonalElevation = 1.dp,
-                        modifier = Modifier
-                            .padding(vertical = 4.dp)
-                            .widthIn(max = 320.dp)
-                    ) {
-                        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                            // Message text
-                            Text(
-                                text = m.text,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            // Compact timestamp
-                            if (m.timestamp > 0L) {
-                                Text(
-                                    text = tsToTime(m.timestamp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
+            var lastDay: String? = null
+            messages.forEach { m ->
+                val k = dayKey(m.timestamp)
+                if (k != lastDay) {
+                    lastDay = k
+                    item(key = "divider-$k") {
+                        DayDivider(dayLabel(m.timestamp))
                     }
+                }
+                item(key = m.id) {
+                    MessageRow(m = m, mine = (m.senderId == myUserId))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DayDivider(label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            tonalElevation = 1.dp
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun MessageRow(m: ChatMessage, mine: Boolean) {
+    val bubbleColor =
+        if (mine) MaterialTheme.colorScheme.primaryContainer
+        else MaterialTheme.colorScheme.surfaceVariant
+
+    val bubbleShape = if (mine) {
+        MaterialTheme.shapes.large.copy(
+            topEnd = MaterialTheme.shapes.small.topEnd,
+            bottomEnd = MaterialTheme.shapes.small.bottomEnd
+        )
+    } else {
+        MaterialTheme.shapes.large.copy(
+            topStart = MaterialTheme.shapes.small.topStart,
+            bottomStart = MaterialTheme.shapes.small.bottomStart
+        )
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
+    ) {
+        Surface(
+            color = bubbleColor,
+            shape = bubbleShape,
+            tonalElevation = 1.dp,
+            modifier = Modifier
+                .padding(vertical = 4.dp)
+                .widthIn(max = 320.dp)
+        ) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(m.text, style = MaterialTheme.typography.bodyMedium)
+                if (m.timestamp > 0L) {
+                    Text(
+                        text = tsToTime(m.timestamp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -226,11 +283,19 @@ private fun MessagesList(
 @Composable
 private fun MessageComposer(
     onSend: (String) -> Unit,
+    onTyping: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
     listState: LazyListState? = null  // so the composer can scroll after sending
 ) {
     val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf("") }
+
+    // When text changes, mark typing; after 900ms of no changes, mark not typing
+    LaunchedEffect(text) {
+        if (text.isNotEmpty()) onTyping(true)
+        kotlinx.coroutines.delay(900)
+        onTyping(false)
+    }
 
     Row(
         modifier = modifier.padding(8.dp),
@@ -249,6 +314,7 @@ private fun MessageComposer(
                 if (t.isNotEmpty()) {
                     onSend(t)
                     text = ""
+                    onTyping(false)
                     // nudge to bottom after send
                     listState?.let { s ->
                         scope.launch {
