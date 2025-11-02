@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,6 +34,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -51,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.example.scrap7.ui.MessagingPanel
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -73,6 +76,7 @@ import com.google.firebase.database.ServerValue
 import com.google.firebase.database.ValueEventListener
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.MapProperties
+import com.google.maps.android.compose.MapUiSettings
 import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.MarkerState
 import com.google.maps.android.compose.Polyline
@@ -81,7 +85,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.logging.Handler
 
 /*
 val latLngListSaver = run {
@@ -150,6 +153,33 @@ fun MapScreen(
     var pickupFitted by remember { mutableStateOf(false) }
     var destFitted by remember { mutableStateOf(false) }
 
+    var showChat by remember { mutableStateOf(false) }
+    val tripId = incomingTrip?.key
+    val myUserId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        ?: run {
+            Log.e("AUTH", "No Firebase user (not signed in)"); return
+        }
+
+    val driverId = incomingTrip?.child("driverId")?.getValue(String::class.java)
+    val riderId  = incomingTrip?.child("riderId")?.getValue(String::class.java)
+    val otherUserId = when (myUserId) {
+        driverId -> riderId
+        riderId  -> driverId
+        else     -> null
+    }
+    val tripStatus: String = incomingTrip?.child("status")?.getValue(String::class.java) ?: ""
+
+    LaunchedEffect(Unit) {
+        val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        android.util.Log.d("AUTH", "role=$role  auth.uid=$uid")
+    }
+
+    LaunchedEffect(showChat, tripId) {
+        if (showChat && tripId != null) {
+            viewModel.clearUnread()
+        }
+    }
+
 // Reset flags when trip status changes
     LaunchedEffect(incomingTrip?.child("status")?.getValue(String::class.java)) {
         val s = incomingTrip?.child("status")?.getValue(String::class.java)
@@ -185,11 +215,65 @@ fun MapScreen(
         }
     }
 
+    LaunchedEffect(tripStatus, incomingTrip?.key, role) {
+        val trip = incomingTrip ?: return@LaunchedEffect
+
+        // Read coords safely
+        fun d(name: String) = trip.child(name).getValue(Double::class.java)
+        val riderLat = d("riderLat"); val riderLng = d("riderLng")
+        val destLat  = d("destinationLat"); val destLng  = d("destinationLng")
+        val driverLat = d("driverLat"); val driverLng = d("driverLng")
+
+        Log.d("Routes",
+            "status=$tripStatus role=$role " +
+                    "driver=(${driverLat},${driverLng}) rider=(${riderLat},${riderLng}) dest=(${destLat},${destLng})"
+        )
+
+        when (tripStatus) {
+            "accepted" -> {
+                // Driver should see driver→rider
+                if (role == "driver" && driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                    viewModel.clearRouteToDestination()
+                    viewModel.fetchDriverToRiderRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(driverLat, driverLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(riderLat,  riderLng)
+                    )
+                }
+                // Rider should see driver→rider too (optional)
+                if (role == "rider" && driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
+                    viewModel.clearRouteToDestination()
+                    viewModel.fetchDriverToRiderRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(driverLat, driverLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(riderLat,  riderLng)
+                    )
+                }
+            }
+
+            "in_progress" -> {
+                // Both see rider→destination (and drop the pickup leg)
+                viewModel.clearRouteToPickup()
+                if (riderLat != null && riderLng != null && destLat != null && destLng != null) {
+                    viewModel.fetchPickupToDestinationRouteIfMoved(
+                        origin = com.google.android.gms.maps.model.LatLng(riderLat, riderLng),
+                        dest   = com.google.android.gms.maps.model.LatLng(destLat,  destLng)
+                    )
+                }
+            }
+
+            else -> {
+                // requested / completed / cancelled
+                viewModel.clearRouteToPickup()
+                viewModel.clearRouteToDestination()
+            }
+        }
+    }
+
+
     if (role == "driver") {
-        LaunchedEffect(userId) {
+        LaunchedEffect(myUserId) {
             FirebaseDatabase.getInstance().getReference("trips")
                 .orderByChild("driverId")
-                .equalTo(userId) // current driver's userId
+                .equalTo(myUserId) // current driver's userId
                 .addChildEventListener(object : ChildEventListener {
                     override fun onChildAdded(
                         snapshot: DataSnapshot,
@@ -241,12 +325,40 @@ fun MapScreen(
                 })
         }
 
+        LaunchedEffect(myUserId) {
+            val ref = com.google.firebase.database.FirebaseDatabase.getInstance().getReference("trips")
+
+            // 3a) Does my filtered query return anything?
+            ref.orderByChild("driverId").equalTo(myUserId).get()
+                .addOnSuccessListener { snap ->
+                    android.util.Log.d("TripsProbe", "equalTo(myUserId) count=${snap.childrenCount}")
+                    for (c in snap.children) {
+                        android.util.Log.d(
+                            "TripsProbe",
+                            "tripId=${c.key} status=${c.child("status").value}"
+                        )
+                    }
+                }
+                .addOnFailureListener { e ->
+                    android.util.Log.e("TripsProbe", "Permission denied or error: ${e.message}", e)
+                }
+
+            // 3b) Optional: root peek (may be denied by rules; that's fine)
+            ref.limitToFirst(1).get()
+                .addOnSuccessListener { snap ->
+                    android.util.Log.d("TripsProbe", "/trips exists? hasChildren=${snap.hasChildren()}")
+                }
+                .addOnFailureListener { e ->
+                    android.util.Log.e("TripsProbe", "Root read blocked (expected): ${e.message}")
+                }
+        }
+
         // check for trips in Firebase that are "accepted" or "in-progress" and restore it when moving back from message screen
-        LaunchedEffect(userId, role) {
+        LaunchedEffect(myUserId, role) {
             if (role == "driver") {
                 val tripRef = FirebaseDatabase.getInstance().getReference("trips")
                 tripRef.orderByChild("driverId")
-                    .equalTo(userId)
+                    .equalTo(myUserId)
                     .get()
                     .addOnSuccessListener { snapshot ->
                         for (tripSnapshot in snapshot.children) {
@@ -318,7 +430,7 @@ fun MapScreen(
 
                     FirebaseDatabase.getInstance()
                         .getReference("driversOnline")
-                        .child(userId)
+                        .child(myUserId)
                         .setValue(locationData)
                         .addOnSuccessListener {
                             Log.d("MapScreen", "Driver location uploaded successfully")
@@ -354,7 +466,7 @@ fun MapScreen(
 
                 FirebaseDatabase.getInstance().getReference("trips")
                     .orderByChild("riderId")
-                    .equalTo(userId)
+                    .equalTo(myUserId)
                     .addChildEventListener(object : ChildEventListener {
                         override fun onChildAdded(
                             snapshot: DataSnapshot,
@@ -554,7 +666,7 @@ fun MapScreen(
                     val fused = LocationServices.getFusedLocationProviderClient(context)
 
                     val tripsRef   = FirebaseDatabase.getInstance().getReference("trips").child(tripId)
-                    val onlineRef  = FirebaseDatabase.getInstance().getReference("driversOnline").child(userId)
+                    val onlineRef  = FirebaseDatabase.getInstance().getReference("driversOnline").child(myUserId)
 
                     // ~2s desired interval; min 1s between updates
                     val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
@@ -712,26 +824,31 @@ fun MapScreen(
             }
 
             // Bump unread when new messages arrive from the *other* user
-            DisposableEffect(incomingTrip?.key, userId) {
+            DisposableEffect(incomingTrip?.key, myUserId) {
                 val tripId = incomingTrip?.key
                 if (tripId == null) {
                     onDispose { }
                 } else {
-                    // Set a baseline so existing history doesn't count as unread
                     viewModel.markUnreadBaselineNowIfUnset()
 
-                    val ref = FirebaseDatabase.getInstance().getReference("messages").child(tripId)
+                    val ref = FirebaseDatabase.getInstance()
+                        .getReference("trips").child(tripId).child("messages")
+
                     val listener = object : ChildEventListener {
                         override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                            // Expecting your Message data class with senderId:String? and timeStamp:Long?
-                            val msg = snapshot.getValue(Message::class.java)
-                            viewModel.bumpUnreadIfNeeded(msg?.senderId, msg?.timeStamp, userId)
+                            val from = snapshot.child("senderId").getValue(String::class.java)
+                            val ts   = snapshot.child("timestamp").getValue(Long::class.java)
+                            viewModel.bumpUnreadIfNeeded(from, ts, myUserId)
                         }
-                        override fun onCancelled(error: DatabaseError) {}
                         override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
                         override fun onChildRemoved(snapshot: DataSnapshot) {}
                         override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+                        override fun onCancelled(error: DatabaseError) {
+                            Log.e("UnreadListen", "messages listener cancelled: ${error.message} @ trips/$tripId/messages")
+
+                        }
                     }
+
                     ref.addChildEventListener(listener)
                     onDispose { ref.removeEventListener(listener) }
                 }
@@ -776,11 +893,15 @@ fun MapScreen(
             }
 
             // Show map
-        GoogleMap(
+            GoogleMap(
             modifier = Modifier.fillMaxSize(),
             cameraPositionState = cameraPositionState,
             onMapLoaded = { Log.d("MapHealth", "Map tiles loaded")},
             properties = MapProperties(isMyLocationEnabled = userLocation != null),
+                uiSettings = MapUiSettings(
+                    zoomControlsEnabled = false,     // disable built-in zoom
+                    myLocationButtonEnabled = false  // (optional) we already recenter ourselves
+                ),
             onMapClick = { latLng ->
                 shouldFollowUser = false // disable following when user taps map
 
@@ -791,8 +912,6 @@ fun MapScreen(
                 }
             },
             content = {
-                val tripStatus = incomingTrip?.child("status")?.getValue(String::class.java)
-
                 // "You" marker, explicit per role
                 userLocation?.let {
                     if (role == "rider") {
@@ -843,55 +962,100 @@ fun MapScreen(
 
                 // Route: Driver to Pickup (show to both during ACCEPTED)
                 if (tripStatus == "accepted" && viewModel.routeToPickup.isNotEmpty()) {
-                    Log.d("PolylineDraw", "Drawing routeToPickup with ${routeToPickup.size} points")
-                    Polyline(
-                        points = routeToPickup,
-                        color = Color.Red, // color = Color.Blue,
-                        width = 12f, // width = 8f
-                        pattern = null
-                    )
+                    androidx.compose.runtime.key("pickup-$tripStatus") {
+                        Log.d(
+                            "PolylineDraw",
+                            "Drawing routeToPickup with ${routeToPickup.size} points"
+                        )
+                        Polyline(
+                            points = routeToPickup,
+                            color = Color.Red, // color = Color.Blue,
+                            width = 12f, // width = 8f
+                            pattern = null
+                        )
+                    }
                 }
 
                 // Route: Pickup to Destination (dashed green)
                 if (tripStatus == "in_progress" && viewModel.routeToDestination.isNotEmpty()) {
-                    Log.d(
-                        "PolylineDraw",
-                        "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
-                    )
-                    Polyline(
-                        points = routeToDestination,
-                        color = Color.Magenta, // Color.Green,
-                        width = 20f, // 8f,
-                        pattern = null // listOf(Dot(), Gap(10f)) // Dashed line
-                    )
+                    androidx.compose.runtime.key("dest-$tripStatus") {
+                        Log.d(
+                            "PolylineDraw",
+                            "Driver routeToDestination with ${routeToDestination.size} points (role = $role)"
+                        )
+                        Polyline(
+                            points = routeToDestination,
+                            color = Color.Magenta, // Color.Green,
+                            width = 20f, // 8f,
+                            pattern = null // listOf(Dot(), Gap(10f)) // Dashed line
+                        )
+                    }
                 }
             }
         )
 
-            if (incomingTrip?.key != null) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp)
-                ) {
-                    BadgedBox(
-                        badge = {
-                            val count = viewModel.unreadCount
-                            if (count > 0) Badge { Text(if (count > 9) "9+" else "$count") }
-                        }
-                    ) {
-                        FloatingActionButton(
-                            onClick = {
-                                viewModel.clearUnread() // reset badge before navigating
-                                navController.navigate("chat/${incomingTrip?.key ?: ""}/$userId")
-                            }
-                        ) {
-                            Text("Chat")
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                // Zoom in
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { cameraPositionState.move(CameraUpdateFactory.zoomIn()) }
+                ) { Text("+") }
+
+                // Zoom out
+                androidx.compose.material3.SmallFloatingActionButton(
+                    onClick = { cameraPositionState.move(CameraUpdateFactory.zoomOut()) }
+                ) { Text("–") }
+
+                // Center on me (now for BOTH rider & driver)
+                androidx.compose.material3.FloatingActionButton(
+                    onClick = {
+                        shouldFollowUser = true
+                        userLocation?.let {
+                            cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(it, 16f))
                         }
                     }
+                ) { Icon(Icons.Default.Place, contentDescription = "Re-center") }
+
+                // Chat (badged)
+                BadgedBox(
+                    badge = {
+                        val count = viewModel.unreadCount
+                        if (!showChat && count > 0) Badge { Text(if (count > 9) "9+" else "$count") }
+                    }
+                ) {
+                    androidx.compose.material3.FloatingActionButton(
+                        onClick = {
+                            val opening = !showChat
+                            showChat = opening
+                        }
+                    ) { Text("Chat") }
                 }
             }
 
+            if (showChat && tripId != null && otherUserId != null) {
+                Surface(
+                    tonalElevation = 6.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .heightIn(min = 220.dp, max = 360.dp)
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    MessagingPanel(
+                        tripId = tripId,
+                        myUserId = myUserId,
+                        otherUserId = otherUserId,
+                        visible = true,
+                        tripStatus = tripStatus,
+                        onClose = { showChat = false }
+                        )
+                }
+            }
         }
 
         // Request Pickup Button (only for riders)
@@ -929,34 +1093,13 @@ fun MapScreen(
             Button(
                 onClick = {
                     Log.d("MapScreen", "Request Pickup button pressed. Selected destination: $selectedDestination")
-                    requestPickup(userId, userLocation, selectedDestination, drivers)
+                    requestPickup(myUserId, userLocation, selectedDestination, drivers)
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp)
             ) {
                 Text("Request Pickup")
-            }
-
-            // Re-center button
-            Button(
-                onClick = {
-                    shouldFollowUser = true
-                    userLocation?.let {
-                        cameraPositionState.move(
-                            CameraUpdateFactory.newLatLngZoom(it, 16f)
-                        )
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd) // bottom right of the screen
-                    .padding(16.dp)
-            ) {
-                // Text("Re-center") // use icon instead for better UI
-                Icon(
-                    imageVector = Icons.Default.Place,
-                    contentDescription = "Re-center"
-                )
             }
         }
 
@@ -1008,8 +1151,11 @@ fun MapScreen(
                         },
                         disableCameraFollow = { shouldFollowUser = false },
                         navController = navController,
-                        userId = userId,
-                        viewModel = viewModel
+                        userId = myUserId,
+                        viewModel = viewModel,
+                        onOpenChat = {
+                            showChat = true
+                        }
                     )
                 }
 
@@ -1225,10 +1371,13 @@ fun requestPickup(
         .child(tripId)
         .setValue(tripData)
         .addOnSuccessListener {
-            Log.d("RequestPickup", "Trip created successfully")
+            android.util.Log.d(
+                "TripsCreate",
+                "OK trip=$tripId riderId=${tripData["riderId"]} driverId=${tripData["driverId"]}"
+            )
         }
-        .addOnFailureListener {
-            Log.e("RequestPickup", "Failed to create trip", it)
+        .addOnFailureListener { e ->
+            android.util.Log.e("TripsCreate", "FAIL: ${e.message}", e)
         }
 }
 
@@ -1256,7 +1405,8 @@ fun IncomingTripCard(
     onRouteToDestinationDecoded: (List<LatLng>) -> Unit,
     navController: NavController,
     userId: String,
-    viewModel: MapViewModel
+    viewModel: MapViewModel,
+    onOpenChat: () -> Unit
 ) {
     Log.d("TripUI", "Trip popup triggered for rider: ${trip.child("riderId").value}")
     val riderId = trip.child("riderId").getValue(String::class.java) ?: "Unknown"
@@ -1328,25 +1478,6 @@ fun IncomingTripCard(
                     ) {
                         Text("Start Trip")
                     }
-
-
-                    // Message Button
-                    Button(
-                        onClick = {
-                            val tripId = trip.key
-                            if (tripId != null) {
-                                navController.navigate("chat/$tripId/$userId")
-                            } else {
-                                Log.e("ChatNav", "Trip ID is null, cannot navigate to chat")
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp)
-                    ) {
-                        Text("Message")
-                    }
-
                 }
 
                 // Optionally show route or completion
@@ -1400,63 +1531,9 @@ fun IncomingTripCard(
                 ) {
                     Text("Complete Trip")
                 }
-
-
-                    // Message Button
-                    Button(
-                        onClick = {
-                            val tripId = trip.key
-                            if (tripId != null) {
-                                navController.navigate("chat/$tripId/$userId")
-                            } else {
-                                Log.e("ChatNav", "Trip ID is null, cannot navigate to chat")
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Gray),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp)
-                    ) {
-                        Text("Message")
-                    }
             }
             }
             }
         }
     }
 }
-
-/*
-// --- Route helper used by MapScreen.kt call sites ---
-private fun fetchRoute(
-    origin: String,
-    destination: String,
-    onRouteDecoded: (List<LatLng>) -> Unit
-) {
-    CoroutineScope(Dispatchers.IO).launch {
-        try {
-            val response = DirectionsClient.service.getRoute(
-                origin = origin,
-                destination = destination,
-                apiKey = Keys.MAPS_API_KEY
-            )
-            if (response.isSuccessful) {
-                val polyline = response.body()
-                    ?.routes?.firstOrNull()
-                    ?.overview_polyline?.points
-
-                if (!polyline.isNullOrEmpty()) {
-                    val decoded = decodePolyline(polyline)
-                    withContext(Dispatchers.Main) {
-                        onRouteDecoded(decoded) // safe to touch ViewModel here
-                    }
-                }
-            } else {
-                Log.e("RouteFetch", "API error: ${response.code()} ${response.message()}")
-            }
-        } catch (e: Exception) {
-            Log.e("RouteFetch", "Error: ${e.message}", e)
-        }
-    }
-}
- */
