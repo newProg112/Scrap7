@@ -18,9 +18,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -39,6 +42,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +58,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import com.example.scrap7.model.TripStatus
+import com.example.scrap7.trip.TripLifecycleViewModel
 import com.example.scrap7.ui.MessagingPanel
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
@@ -68,6 +75,7 @@ import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.libraries.places.api.model.Place
 import com.google.android.libraries.places.widget.Autocomplete
 import com.google.android.libraries.places.widget.model.AutocompleteActivityMode
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.ChildEventListener
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
@@ -99,6 +107,44 @@ val latLngListSaver = run {
 }
  */
 
+private fun requestTripAndNavigate(
+    navController: androidx.navigation.NavController,
+    riderUid: String,
+    pickupLat: Double,
+    pickupLng: Double,
+    pickupAddress: String,
+    destLat: Double,
+    destLng: Double,
+    destAddress: String,
+    driverUid: String? = null // pass when you pre-assign a driver; else leave null
+) {
+    val db = com.google.firebase.database.FirebaseDatabase.getInstance()
+    val tripsRef = db.getReference("trips")
+    val newTripRef = tripsRef.push()
+    val tripId = newTripRef.key ?: return
+
+    val trip = mapOf(
+        "status" to com.example.scrap7.model.TripStatus.REQUESTED.name,
+        "riderId" to riderUid,
+        "driverId" to (driverUid ?: ""), // rules are fine if riderId == auth.uid
+
+        // NEW: flat mirrors that the rest of the screen already listens to
+        "riderLat" to pickupLat,
+        "riderLng" to pickupLng,
+        "destinationLat" to destLat,
+        "destinationLng" to destLng,
+
+        "pickup" to mapOf("lat" to pickupLat, "lng" to pickupLng, "address" to pickupAddress),
+        "destination" to mapOf("lat" to destLat, "lng" to destLng, "address" to destAddress),
+        "timestamps" to mapOf("requested" to com.google.firebase.database.ServerValue.TIMESTAMP)
+    )
+
+    newTripRef.setValue(trip).addOnSuccessListener {
+        // Navigate to the lifecycle-enabled screen
+        navController.navigate("trip/$tripId/rider")
+    }
+}
+
 fun bitmapDescriptorFromVector(context: Context, @DrawableRes resId: Int): BitmapDescriptor {
     val drawable = ContextCompat.getDrawable(context, resId)!!
     drawable.setBounds(0, 0, drawable.intrinsicWidth, drawable.intrinsicHeight)
@@ -113,8 +159,11 @@ fun MapScreen(
     userId: String,
     role: String,
     navController: NavController,
-    viewModel: MapViewModel
+    viewModel: MapViewModel,
+    vm: TripLifecycleViewModel? = null
 ) {
+    val lifecycleUi = vm?.ui?.collectAsState()?.value
+
     //val viewModel: MapViewModel = viewModel()
     val routeToPickup = viewModel.routeToPickup
     val routeToDestination = viewModel.routeToDestination
@@ -136,7 +185,7 @@ fun MapScreen(
 
     var selectedDestination by remember { mutableStateOf<LatLng?>(null) }
 
-    var shouldFollowUser by remember { mutableStateOf(true) }
+    var shouldFollowUser by remember { mutableStateOf(false) }
 
     // var routeToPickup by remember { mutableStateOf<List<LatLng>>(emptyList()) }
     // var routeToDestination by remember { mutableStateOf<List<LatLng>>(emptyList()) }
@@ -169,6 +218,10 @@ fun MapScreen(
     }
     val tripStatus: String = incomingTrip?.child("status")?.getValue(String::class.java) ?: ""
 
+    val canRequest by remember {
+        derivedStateOf { viewModel.pickup != null && viewModel.destination != null }
+    }
+
     LaunchedEffect(Unit) {
         val uid = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
         android.util.Log.d("AUTH", "role=$role  auth.uid=$uid")
@@ -183,8 +236,8 @@ fun MapScreen(
 // Reset flags when trip status changes
     LaunchedEffect(incomingTrip?.child("status")?.getValue(String::class.java)) {
         val s = incomingTrip?.child("status")?.getValue(String::class.java)
-        if (s != "accepted") pickupFitted = false
-        if (s != "in_progress") destFitted = false
+        if (s != TripStatus.ACCEPTED.name) pickupFitted = false
+        if (s != TripStatus.IN_PROGRESS.name) destFitted = false
     }
 
 // Fit once when pickup leg arrives
@@ -215,6 +268,10 @@ fun MapScreen(
         }
     }
 
+    LaunchedEffect(vm) {
+        if (vm != null) shouldFollowUser = true
+    }
+
     LaunchedEffect(tripStatus, incomingTrip?.key, role) {
         val trip = incomingTrip ?: return@LaunchedEffect
 
@@ -230,7 +287,7 @@ fun MapScreen(
         )
 
         when (tripStatus) {
-            "accepted" -> {
+            TripStatus.ACCEPTED.name -> {
                 // Driver should see driver→rider
                 if (role == "driver" && driverLat != null && driverLng != null && riderLat != null && riderLng != null) {
                     viewModel.clearRouteToDestination()
@@ -249,7 +306,7 @@ fun MapScreen(
                 }
             }
 
-            "in_progress" -> {
+            TripStatus.IN_PROGRESS.name -> {
                 // Both see rider→destination (and drop the pickup leg)
                 viewModel.clearRouteToPickup()
                 if (riderLat != null && riderLng != null && destLat != null && destLng != null) {
@@ -286,7 +343,7 @@ fun MapScreen(
                             "onChildAdded fired: tripId=${snapshot.key}, status=$status"
                         )
 
-                        if (status == "requested") {
+                        if (status == TripStatus.REQUESTED.name) {
                             Log.d(
                                 "TripDebug",
                                 "Setting incomingTrip for tripId=${snapshot.key}"
@@ -303,8 +360,8 @@ fun MapScreen(
                         Log.d("TripMatch", "Trip status changed to: $status")
 
                         when (status) {
-                            "accepted", "in_progress" -> incomingTrip = snapshot
-                            "completed" -> {
+                            TripStatus.ACCEPTED.name, TripStatus.IN_PROGRESS.name -> incomingTrip = snapshot
+                            TripStatus.COMPLETED.name -> {
                                 completedTrip = snapshot
                                 Log.d("TripCancelDebug", "incomingTrip manually set to null")
                                 incomingTrip = null
@@ -363,13 +420,13 @@ fun MapScreen(
                     .addOnSuccessListener { snapshot ->
                         for (tripSnapshot in snapshot.children) {
                             val status = tripSnapshot.child("status").getValue(String::class.java)
-                            if (status == "accepted" || status == "in_progress") {
+                            if (status == TripStatus.ACCEPTED.name || status == TripStatus.IN_PROGRESS.name) {
                                 Log.d("TripRestore", "Restoring active trip: ${tripSnapshot.key}")
                                 incomingTrip = tripSnapshot
 
                                 val statusNow = tripSnapshot.child("status").getValue(String::class.java)
 
-                                if (statusNow == "accepted") {
+                                if (statusNow == TripStatus.ACCEPTED.name) {
                                     val dLat = tripSnapshot.child("driverLat").getValue(Double::class.java)
                                     val dLng = tripSnapshot.child("driverLng").getValue(Double::class.java)
                                     val rLat = tripSnapshot.child("riderLat").getValue(Double::class.java)
@@ -381,7 +438,7 @@ fun MapScreen(
                                             debounceMs = 0L
                                         )
                                     }
-                                } else if (statusNow == "in_progress") {
+                                } else if (statusNow == TripStatus.IN_PROGRESS.name) {
                                     val rLat = tripSnapshot.child("riderLat").getValue(Double::class.java)
                                     val rLng = tripSnapshot.child("riderLng").getValue(Double::class.java)
                                     val destLat = tripSnapshot.child("destinationLat").getValue(Double::class.java)
@@ -402,6 +459,18 @@ fun MapScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // Trip lifecycle banner + stepper (overlay at the top)
+        if (lifecycleUi != null) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+            ) {
+                TripStatusBanner(lifecycleUi.status)
+                TripStepper(lifecycleUi.stepIndex)
+            }
+        }
+
         // Start location tracking
         RequestLocationPermission {
             locationTracker.startListening { location ->
@@ -409,7 +478,7 @@ fun MapScreen(
                 userLocation = latLng
 
                 // Move the map camera to current location
-                if (shouldFollowUser) {
+                if (vm != null && shouldFollowUser) {
                     cameraPositionState.move(
                         CameraUpdateFactory.newLatLngZoom(latLng, 16f)
                     )
@@ -473,7 +542,7 @@ fun MapScreen(
                             previousChildName: String?
                         ) {
                             val status = snapshot.child("status").getValue(String::class.java)
-                            if (status == "accepted") {
+                            if (status == TripStatus.ACCEPTED.name) {
                                 Log.d("RiderTrip", "Driver accepted the trip!")
                                 incomingTrip = snapshot
                             }
@@ -487,8 +556,8 @@ fun MapScreen(
                             Log.d("TripMatch", "Trip status changed to: $status")
 
                             when (status) {
-                                "accepted", "in_progress" -> incomingTrip = snapshot
-                                "completed" -> {
+                                TripStatus.ACCEPTED.name, TripStatus.IN_PROGRESS.name -> incomingTrip = snapshot
+                                TripStatus.COMPLETED.name -> {
                                     completedTrip = snapshot
                                     Log.d("TripCancelDebug", "incomingTrip manually set to null")
                                     incomingTrip =
@@ -546,7 +615,7 @@ fun MapScreen(
                         incomingTrip?.let { trip ->
                             val status = trip.child("status").getValue(String::class.java)
 
-                            if (status == "accepted") {
+                            if (status == TripStatus.ACCEPTED.name) {
                                 if (role == "driver") {
                                     val driverLat = trip.child("driverLat").getValue(Double::class.java)
                                     val driverLng = trip.child("driverLng").getValue(Double::class.java)
@@ -624,7 +693,7 @@ fun MapScreen(
                 if (!allow) return@LaunchedEffect
 
                 when (status) {
-                    "accepted" -> {
+                    TripStatus.ACCEPTED.name -> {
                         val rLat = incomingTrip?.child("riderLat")?.getValue(Double::class.java)
                         val rLng = incomingTrip?.child("riderLng")?.getValue(Double::class.java)
                         if (rLat != null && rLng != null) {
@@ -636,7 +705,7 @@ fun MapScreen(
                             )
                         }
                     }
-                    "in_progress" -> {
+                    TripStatus.IN_PROGRESS.name -> {
                         val dLat = incomingTrip?.child("destinationLat")?.getValue(Double::class.java)
                         val dLng = incomingTrip?.child("destinationLng")?.getValue(Double::class.java)
                         if (dLat != null && dLng != null) {
@@ -706,7 +775,7 @@ fun MapScreen(
                     val statusListener = object : ValueEventListener {
                         override fun onDataChange(snap: DataSnapshot) {
                             val status = snap.child("status").getValue(String::class.java)
-                            val shouldRun = status == "accepted" || status == "in_progress"
+                            val shouldRun = status == TripStatus.ACCEPTED.name || status == TripStatus.IN_PROGRESS.name
 
                             // Check either FINE or COARSE location permission
                             val hasLocationPermission =
@@ -764,13 +833,13 @@ fun MapScreen(
                         val status = snap.child("status").getValue(String::class.java)
                         android.util.Log.d("TripListen", "status=$status")
 
-                        if (status == "in_progress" && viewModel.routeToPickup.isNotEmpty()) {
+                        if (status == TripStatus.IN_PROGRESS.name && viewModel.routeToPickup.isNotEmpty()) {
                             viewModel.clearRouteToPickup()
                         }
-                        if (status == "accepted" && viewModel.routeToDestination.isNotEmpty()) {
+                        if (status == TripStatus.ACCEPTED.name && viewModel.routeToDestination.isNotEmpty()) {
                             viewModel.clearRouteToDestination()
                         }
-                        if (status == "completed" || status == "cancelled") {
+                        if (status == TripStatus.COMPLETED.name || status == TripStatus.CANCELLED.name) {
                             viewModel.clearRouteToPickup()
                             viewModel.clearRouteToDestination()
                         }
@@ -783,7 +852,7 @@ fun MapScreen(
                         }
 
                         when (status) {
-                            "accepted" -> {
+                            TripStatus.ACCEPTED.name -> {
                                 if (viewModel.routeToPickup.isEmpty()) {
                                     val rLat = snap.child("riderLat").getValue(Double::class.java)
                                     val rLng = snap.child("riderLng").getValue(Double::class.java)
@@ -796,7 +865,7 @@ fun MapScreen(
                                     }
                                 }
                             }
-                            "in_progress" -> {
+                            TripStatus.IN_PROGRESS.name -> {
                                 if (viewModel.routeToDestination.isEmpty()) {
                                     val rLat = snap.child("riderLat").getValue(Double::class.java)
                                     val rLng = snap.child("riderLng").getValue(Double::class.java)
@@ -863,7 +932,7 @@ fun MapScreen(
                 val status = trip.child("status").getValue(String::class.java) ?: return@LaunchedEffect
 
                 when (status) {
-                    "accepted" -> {
+                    TripStatus.ACCEPTED.name -> {
                         val dLat = trip.child("driverLat").getValue(Double::class.java)
                         val dLng = trip.child("driverLng").getValue(Double::class.java)
                         val rLat = trip.child("riderLat").getValue(Double::class.java)
@@ -876,7 +945,7 @@ fun MapScreen(
                             )
                         }
                     }
-                    "in_progress" -> {
+                    TripStatus.IN_PROGRESS.name -> {
                         val rLat   = trip.child("riderLat").getValue(Double::class.java)
                         val rLng   = trip.child("riderLng").getValue(Double::class.java)
                         val destLat= trip.child("destinationLat").getValue(Double::class.java)
@@ -961,7 +1030,7 @@ fun MapScreen(
                 }
 
                 // Route: Driver to Pickup (show to both during ACCEPTED)
-                if (tripStatus == "accepted" && viewModel.routeToPickup.isNotEmpty()) {
+                if (tripStatus == TripStatus.ACCEPTED.name && viewModel.routeToPickup.isNotEmpty()) {
                     androidx.compose.runtime.key("pickup-$tripStatus") {
                         Log.d(
                             "PolylineDraw",
@@ -977,7 +1046,7 @@ fun MapScreen(
                 }
 
                 // Route: Pickup to Destination (dashed green)
-                if (tripStatus == "in_progress" && viewModel.routeToDestination.isNotEmpty()) {
+                if (tripStatus == TripStatus.IN_PROGRESS.name && viewModel.routeToDestination.isNotEmpty()) {
                     androidx.compose.runtime.key("dest-$tripStatus") {
                         Log.d(
                             "PolylineDraw",
@@ -1058,48 +1127,74 @@ fun MapScreen(
             }
         }
 
-        // Request Pickup Button (only for riders)
-        if (role == "rider") {
+        // PRE-TRIP CONTROLS: only show on the plain map (no lifecycle VM)
+        if (vm == null && role.equals("rider", ignoreCase = true)) {
+
             val autocompleteLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.StartActivityForResult()
             ) { result ->
-                if (result.resultCode == Activity.RESULT_OK) {
+                if (result.resultCode == Activity.RESULT_OK && result.data != null) {
                     val place = Autocomplete.getPlaceFromIntent(result.data!!)
-                    val latLng = place.latLng
-                    Log.d("Places", "Place selected: ${place.name} - ${place.latLng}")
-
-                    // TODO: Save this destination (e.g., in ViewModel or local state)
-                } else if (result.resultCode == Activity.RESULT_CANCELED) {
-                    Log.d("Places", "Autocomplete canceled")
+                    val latLng = place.latLng ?: return@rememberLauncherForActivityResult
+                    viewModel.updateDestination(latLng)
                 }
             }
 
-            // Set Destination button
-            Button(
-                onClick = {
-                    val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.LAT_LNG)
-                    val intent = Autocomplete.IntentBuilder(AutocompleteActivityMode.OVERLAY, fields)
-                        .build(context)
-                    autocompleteLauncher.launch(intent)
-                },
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 72.dp) // stack above "Request Pickup"
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 16.dp)
+                    .padding(bottom = 96.dp), // clears the center FAB and Chat FAB
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Set Destination")
-            }
+                // Set Destination
+                Button(
+                    onClick = {
+                        val fields = listOf(Place.Field.ID, Place.Field.NAME, Place.Field.LAT_LNG)
+                        val intent = Autocomplete.IntentBuilder(
+                            AutocompleteActivityMode.OVERLAY, fields
+                        ).build(context)
+                        autocompleteLauncher.launch(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth(0.9f)
+                ) { Text("Set Destination") }
 
-            // Request Pickup button
-            Button(
-                onClick = {
-                    Log.d("MapScreen", "Request Pickup button pressed. Selected destination: $selectedDestination")
-                    requestPickup(myUserId, userLocation, selectedDestination, drivers)
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(16.dp)
-            ) {
-                Text("Request Pickup")
+                Spacer(Modifier.height(8.dp))
+
+                // Set Pickup = Map Center
+                Button(
+                    onClick = {
+                        val center = cameraPositionState.position.target
+                        viewModel.updatePickup(center)
+                    },
+                    modifier = Modifier.fillMaxWidth(0.9f)
+                ) { Text("Set Pickup = Map Center") }
+
+                Spacer(Modifier.height(8.dp))
+
+                // Request Pickup (enabled only when both points are set)
+                Button(
+                    onClick = {
+                        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return@Button
+                        val p = viewModel.pickup ?: return@Button
+                        val d = viewModel.destination ?: return@Button
+
+                        requestTripAndNavigate(
+                            navController = navController,
+                            riderUid = uid,
+                            pickupLat = p.latitude,
+                            pickupLng = p.longitude,
+                            pickupAddress = "Pickup",
+                            destLat = d.latitude,
+                            destLng = d.longitude,
+                            destAddress = "Destination"
+                        )
+                    },
+                    enabled = canRequest,
+                    modifier = Modifier.fillMaxWidth(0.9f)
+                ) { Text("Request Pickup") }
             }
         }
 
@@ -1134,12 +1229,12 @@ fun MapScreen(
                         onRouteToPickupDecoded = { viewModel.updateRouteToPickup(it) },
                         onRouteToDestinationDecoded = { viewModel.updateRouteToDestination(it) },
                         onAccept = {
-                            trip.ref.child("status").setValue("accepted")
+                            trip.ref.child("status").setValue(TripStatus.ACCEPTED.name)
                             Log.d("TripMatch", "Trip accepted by driver")
                             shouldFollowUser = false
                         },
                         onDecline = {
-                            trip.ref.child("status").setValue("declined")
+                            trip.ref.child("status").setValue(TripStatus.CANCELLED.name)
                             Log.d("TripCancelDebug", "incomingTrip manually set to null")
                             incomingTrip = null
                             Log.d("TripMatch", "Trip declined by driver")
@@ -1165,7 +1260,7 @@ fun MapScreen(
         if (role == "rider") {
             incomingTrip?.let { trip ->
                 val status = trip.child("status").getValue(String::class.java)
-                if (status == "accepted" || status == "in_progress") {
+                if (status == TripStatus.ACCEPTED.name || status == TripStatus.IN_PROGRESS.name) {
                     val pickupLat = trip.child("riderLat").getValue(Double::class.java)
                     val pickupLng = trip.child("riderLng").getValue(Double::class.java)
                     val destLat = trip.child("destinationLat").getValue(Double::class.java)
@@ -1221,7 +1316,7 @@ fun MapScreen(
 
                     LaunchedEffect(trip.key) {
                         val s = trip.child("status").getValue(String::class.java)
-                        if (s != "in_progress") return@LaunchedEffect
+                        if (s != TripStatus.IN_PROGRESS.name) return@LaunchedEffect
 
                         val pickupLat = trip.child("riderLat").getValue(Double::class.java)
                         val pickupLng = trip.child("riderLng").getValue(Double::class.java)
@@ -1256,6 +1351,33 @@ fun MapScreen(
                 }
             )
         }
+
+        // Trip lifecycle primary action button (overlay at the bottom)
+        if (lifecycleUi != null && vm != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            ) {
+                TripPrimaryCTA(
+                    label = lifecycleUi.primaryLabel,
+                    enabled = lifecycleUi.primaryEnabled,
+                    onClick = { vm.onPrimaryClick() }
+                )
+            }
+        }
+
+        // Debug overlay (temporary)
+        androidx.compose.material3.Text(
+            text = "pickup=${viewModel.pickup != null}  dest=${viewModel.destination != null}",
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+                .background(Color(0x66000000))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            color = Color.White
+        )
     }
 
     /*
@@ -1360,7 +1482,7 @@ fun requestPickup(
         "destinationLng" to destination?.longitude,
         "driverLat" to driverLoc.latitude,
         "driverLng" to driverLoc.longitude,
-        "status" to "requested",
+        "status" to com.example.scrap7.model.TripStatus.REQUESTED.name,
         "timestamp" to System.currentTimeMillis()
     )
 
@@ -1430,7 +1552,7 @@ fun IncomingTripCard(
                 val status = rememberUpdatedState(trip.child("status").getValue(String::class.java))
 
                 LaunchedEffect(status.value) {
-                    if (status.value == "accepted") {
+                    if (status.value == TripStatus.ACCEPTED.name) {
                         val pickupLat = trip.child("riderLat").getValue(Double::class.java)
                         val pickupLng = trip.child("riderLng").getValue(Double::class.java)
 
@@ -1451,7 +1573,7 @@ fun IncomingTripCard(
 
                 when (status.value) {
                     // Accept/Decline
-                    "requested" -> {
+                    TripStatus.REQUESTED.name -> {
                     Row(
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         modifier = Modifier.fillMaxWidth().padding(top = 16.dp)
@@ -1466,10 +1588,10 @@ fun IncomingTripCard(
                 }
 
                 // Show "Start Trip"
-                "accepted" -> {
+                TripStatus.ACCEPTED.name -> {
                     Button(
                         onClick = {
-                            trip.ref.child("status").setValue("in_progress")
+                            trip.ref.child("status").setValue(TripStatus.IN_PROGRESS.name)
                             Log.d("TripFlow", "Trip marked as in_progress")
                         },
                         modifier = Modifier
@@ -1481,7 +1603,7 @@ fun IncomingTripCard(
                 }
 
                 // Optionally show route or completion
-                "in_progress" -> {
+                TripStatus.IN_PROGRESS.name -> {
                     val pickupLat = trip.child("riderLat").getValue(Double::class.java)
                     val pickupLng = trip.child("riderLng").getValue(Double::class.java)
                     val destLat = trip.child("destinationLat").getValue(Double::class.java)
@@ -1517,7 +1639,7 @@ fun IncomingTripCard(
                         }
 
                         // Mark trip as completed
-                        trip.ref.child("status").setValue("completed")
+                        trip.ref.child("status").setValue(TripStatus.COMPLETED.name)
                         Log.d("TripFlow", "Trip marked as completed")
 
                         // Optional delete the trip from Firebase
@@ -1536,4 +1658,58 @@ fun IncomingTripCard(
             }
         }
     }
+}
+
+@Composable
+private fun TripStatusBanner(status: com.example.scrap7.model.TripStatus) {
+    val text = when (status) {
+        com.example.scrap7.model.TripStatus.REQUESTED   -> "Waiting for driver to accept…"
+        com.example.scrap7.model.TripStatus.ACCEPTED    -> "Driver accepted — heading to you"
+        com.example.scrap7.model.TripStatus.ARRIVING    -> "Driver arriving at pickup"
+        com.example.scrap7.model.TripStatus.IN_PROGRESS -> "Trip in progress"
+        com.example.scrap7.model.TripStatus.COMPLETED   -> "Trip completed"
+        com.example.scrap7.model.TripStatus.CANCELLED   -> "Trip cancelled"
+    }
+    val bg = when (status) {
+        com.example.scrap7.model.TripStatus.REQUESTED -> Color(0xFF2563EB)
+        com.example.scrap7.model.TripStatus.ACCEPTED,
+        com.example.scrap7.model.TripStatus.ARRIVING -> Color(0xFF10B981)
+        com.example.scrap7.model.TripStatus.IN_PROGRESS -> Color(0xFFF59E0B)
+        com.example.scrap7.model.TripStatus.COMPLETED -> Color(0xFF22C55E)
+        com.example.scrap7.model.TripStatus.CANCELLED -> Color(0xFFEF4444)
+    }
+    Box(Modifier.fillMaxWidth().background(bg).padding(12.dp)) {
+        Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+@Composable
+private fun TripStepper(stepIndex: Int) {
+    val dots = 5
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        repeat(dots) { i ->
+            Box(
+                Modifier
+                    .padding(horizontal = 2.dp)
+                    .heightIn(min = 12.dp)
+                    .background(if (i <= stepIndex) Color.Black else Color.LightGray, RoundedCornerShape(999.dp))
+                    .weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TripPrimaryCTA(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(16.dp)
+    ) { Text(label) }
 }

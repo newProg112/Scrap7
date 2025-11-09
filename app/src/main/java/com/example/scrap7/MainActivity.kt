@@ -29,6 +29,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.scrap7.model.UserRole
+import com.example.scrap7.ui.screens.TripHostScreen
 import com.example.scrap7.ui.theme.Scrap7Theme
 import com.google.android.libraries.places.api.Places
 import com.google.firebase.FirebaseApp
@@ -149,33 +151,59 @@ fun MyApp() {
 @Composable
 fun MyApp() {
     val navController = rememberNavController()
-    val  mapViewModel: MapViewModel = viewModel()
+    val mapViewModel: MapViewModel = viewModel()
 
     NavHost(navController, startDestination = "login") {
+
+        // 1) Login -> go to PLAIN MAP (no lifecycle VM yet)
         composable("login") {
             LoginScreen { userId, role ->
                 navController.navigate("map/$userId/$role")
             }
         }
 
+        // 2) PLAIN MAP ROUTE — shows normal MapScreen, vm = null
         composable(
-            "map/{userId}/{role}",
+            route = "map/{userId}/{role}",
             arguments = listOf(
                 navArgument("userId") { type = NavType.StringType },
-                navArgument("role") { type = NavType.StringType }
+                navArgument("role")   { type = NavType.StringType }
             )
         ) { backStackEntry ->
-            val userId = backStackEntry.arguments?.getString("userId") ?: ""
-            val role = backStackEntry.arguments?.getString("role") ?: "rider"
+            val userId = backStackEntry.arguments?.getString("userId").orEmpty()
+            val roleArg = backStackEntry.arguments?.getString("role").orEmpty()
+
             MapScreen(
                 userId = userId,
-                role = role,
+                role = roleArg,
                 navController = navController,
-                viewModel = mapViewModel
+                viewModel = mapViewModel,
+                vm = null // IMPORTANT: no lifecycle overlay here
             )
         }
 
-        // Navigate to Message screen
+        // 3) TRIP ROUTE — builds lifecycle VM via TripHostScreen
+        composable(
+            route = "trip/{tripId}/{role}",
+            arguments = listOf(
+                navArgument("tripId") { type = NavType.StringType },
+                navArgument("role")   { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val tripId  = backStackEntry.arguments?.getString("tripId").orEmpty()
+            val roleArg = backStackEntry.arguments?.getString("role").orEmpty()
+            val userRole = if (roleArg.equals("driver", ignoreCase = true))
+                UserRole.DRIVER else UserRole.RIDER
+
+            TripHostScreen(
+                role = userRole,
+                tripId = tripId,
+                navController = navController,
+                mapViewModel = mapViewModel
+            )
+        }
+
+        // 4) Chat — unchanged
         composable(
             "chat/{tripId}/{userId}",
             arguments = listOf(
@@ -183,8 +211,8 @@ fun MyApp() {
                 navArgument("userId") { type = NavType.StringType }
             )
         ) { backStackEntry ->
-            val tripId = backStackEntry.arguments?.getString("tripId") ?: ""
-            val userId = backStackEntry.arguments?.getString("userId") ?: ""
+            val tripId = backStackEntry.arguments?.getString("tripId").orEmpty()
+            val userId = backStackEntry.arguments?.getString("userId").orEmpty()
             ChatScreen(
                 tripId = tripId,
                 userId = userId,
@@ -192,7 +220,6 @@ fun MyApp() {
                 onBack = { navController.popBackStack() }
             )
         }
-
     }
 }
 
